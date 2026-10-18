@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DASHBOARD REKAP — LP2SSC</title>
+<style>
+*,:after,:before{box-sizing:border-box;border:0 solid #e5e7eb;margin:0;padding:0}
+html,body,#root{min-height:100%;height:100%}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;-webkit-font-smoothing:antialiased;background:#f1f5f9}
+button{cursor:pointer;font-family:inherit}
+input:focus,select:focus{outline:none;box-shadow:none}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes scaleIn{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script>
+const { useState, useEffect, useMemo, useRef, createElement: h } = React;
+
+/* ===================== FIREBASE ===================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyA7B7y6hV8JgrnER3h-8ZpbdTZGYdlUmGQ",
+  authDomain: "absensi-staf-lp2ssc.firebaseapp.com",
+  databaseURL: "https://absensi-staf-lp2ssc-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "absensi-staf-lp2ssc",
+  storageBucket: "absensi-staf-lp2ssc.firebasestorage.app",
+  messagingSenderId: "818550489111",
+  appId: "1:818550489111:web:0fc85d9056686791d01c52"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* ===================== SHARED HELPERS ===================== */
+const MONTH_NAMES_ID = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+
+function toInputDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function dateOffsetStr(d, offsetDays) { return toInputDate(new Date(d.getFullYear(), d.getMonth(), d.getDate() + offsetDays)); }
+function eachDateStr(startStr, endStr) {
+  const out = [];
+  const [ys, ms, ds] = startStr.split("-").map(Number);
+  const [ye, me, de] = endStr.split("-").map(Number);
+  let cur = new Date(ys, ms-1, ds);
+  const end = new Date(ye, me-1, de);
+  while (cur <= end) { out.push(toInputDate(cur)); cur.setDate(cur.getDate() + 1); }
+  return out;
+}
+function weekRangesInMonth(year, month) {
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const ranges = [];
+  const bounds = [[1,7],[8,14],[15,21],[22,daysInMonth]];
+  bounds.forEach((b, idx) => {
+    if (b[0] > daysInMonth) return;
+    const end = Math.min(b[1], daysInMonth);
+    const s = `${year}-${String(month+1).padStart(2,"0")}-${String(b[0]).padStart(2,"0")}`;
+    const e = `${year}-${String(month+1).padStart(2,"0")}-${String(end).padStart(2,"0")}`;
+    ranges.push({ week: idx + 1, start: s, end: e });
+  });
+  return ranges;
+}
+async function copyText(text) {
+  try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand("copy"); document.body.removeChild(ta); return ok;
+  } catch { return false; }
+}
+function toFbKey(name) {
+  return String(name).replace(/\\/g,"\\x5c").replace(/\./g,"\\x2e").replace(/#/g,"\\x23").replace(/\$/g,"\\x24").replace(/\[/g,"\\x5b").replace(/\]/g,"\\x5d");
+}
+function normalizeStatus(st) { return ["HADIR","SAKIT","IZIN","ALFA"].includes(st) ? st : null; }
+function statusShort(st) { return st === "HADIR" ? "H" : st === "IZIN" ? "I" : st === "SAKIT" ? "S" : st === "ALFA" ? "A" : "-"; }
+
+/* ===================== TOAST ===================== */
+function Toast({ msg, visible }) {
+  if (!visible) return null;
+  return h("div", {
+    style: { position:"fixed", bottom:24, left:"50%", transform:"translateX(-50%)", zIndex:400,
+      background:"#111", color:"#fff", padding:"12px 20px", borderRadius:999,
+      fontSize:13, fontWeight:700, boxShadow:"0 12px 32px rgba(0,0,0,.3)",
+      display:"flex", alignItems:"center", gap:8, maxWidth:"90vw", animation:"slideUp .25s ease" }
+  }, [h("span", null, /Gagal/i.test(msg) ? "⚠" : "✓"), h("span", null, msg)]);
+}
+
+/* =====================================================================
+   ============ TEMPLATE — CONSTANTS & PATH HELPERS ====================
+   ===================================================================== */
+const TPL_ROOT = "TEMPLATE ABSEN";
+const TPL_THEME_PALETTE = [
+  { accent:"#7c3aed", accentLight:"#ddd6fe", accentDark:"#6d28d9" },
+  { accent:"#0891b2", accentLight:"#a5f3fc", accentDark:"#0e7490" },
+  { accent:"#16a34a", accentLight:"#bbf7d0", accentDark:"#15803d" },
+  { accent:"#d97706", accentLight:"#fde68a", accentDark:"#b45309" },
+  { accent:"#dc2626", accentLight:"#fecaca", accentDark:"#b91c1c" },
+  { accent:"#c026d3", accentLight:"#f5d0fe", accentDark:"#a21caf" },
+  { accent:"#059669", accentLight:"#a7f3d0", accentDark:"#047857" },
+  { accent:"#2563eb", accentLight:"#bfdbfe", accentDark:"#1d4ed8" },
+  { accent:"#ea580c", accentLight:"#fed7aa", accentDark:"#c2410c" },
+  { accent:"#8b5cf6", accentLight:"#ddd6fe", accentDark:"#7c3aed" }
+];
+const ALL_DAYS = [1,2,3,4,5,6,0];
+
+function tplRoomInfoPath(code) { return `${TPL_ROOT}/rooms/${String(code || "").trim().toUpperCase()}/info`; }
+function tplBasePath(room) { return `${TPL_ROOT}/rooms/${String(room || "").trim().toUpperCase()}`; }
+function tplStudentsPath(room, k) { return `${tplBasePath(room)}/batch_${k}/students`; }
+function tplAttendancePath(room, k, ds) { return `${tplBasePath(room)}/batch_${k}/attendance/${ds}/Keterangan`; }
+
+function makeDefaultProgramConfig() { return { programs: [ { id:"P1", label:"Program 1", subs:[] } ] }; }
+function normalizeProgramDays(raw) {
+  if (Array.isArray(raw) && raw.length) {
+    const set = new Set();
+    raw.forEach(v => { const n = Number(v); if (!isNaN(n) && n >= 0 && n <= 6) set.add(n); });
+    if (set.size) return Array.from(set).sort((a,b) => (a===0?7:a) - (b===0?7:b));
+  }
+  if (raw != null && typeof raw !== "object") {
+    const n = Number(raw);
+    if (!isNaN(n) && n >= 0 && n <= 6) return [n];
+  }
+  return [...ALL_DAYS];
+}
+function normalizeSubs(rawSubs) {
+  let arr = [];
+  if (Array.isArray(rawSubs)) arr = rawSubs;
+  else if (rawSubs && typeof rawSubs === "object") {
+    arr = Object.keys(rawSubs).sort((a,b) => parseInt(a,10) - parseInt(b,10)).map(k => rawSubs[k]);
+  }
+  return arr.filter(s => s && typeof s === "object")
+    .map(s => ({
+      id: String(s.id || ""),
+      label: String(s.label || ("Sub " + s.id)).trim() || ("Sub " + s.id),
+      emoji: Array.from(String(s.emoji || "")).slice(0, 4).join(""),
+      days: normalizeProgramDays(s.days)
+    }))
+    .filter(s => s.id);
+}
+function normalizeProgramConfig(raw) {
+  if (!raw || typeof raw !== "object") return makeDefaultProgramConfig();
+  let rawPrograms = null;
+  if (Array.isArray(raw.programs)) rawPrograms = raw.programs;
+  else if (raw.programs && typeof raw.programs === "object") {
+    rawPrograms = Object.keys(raw.programs).sort((a,b) => parseInt(a,10) - parseInt(b,10)).map(k => raw.programs[k]);
+  }
+  if (rawPrograms) {
+    return { programs: rawPrograms.filter(p => p && typeof p === "object")
+      .map(p => ({ id: String(p.id || ""), label: String(p.label || "").trim() || ("Program " + String(p.id || "1")), subs: normalizeSubs(p.subs) }))
+      .filter(p => p.id) };
+  }
+  const legacyKeys = Object.keys(raw).filter(k => raw[k] && typeof raw[k] === "object" && raw[k].subs !== undefined);
+  if (legacyKeys.length) {
+    return { programs: legacyKeys.sort().map(k => ({ id: k, label: String(raw[k].label || "").trim() || ("Program " + k.slice(1)), subs: normalizeSubs(raw[k].subs) })) };
+  }
+  return makeDefaultProgramConfig();
+}
+function makeBatchKey(pId, sId) { return pId + "_" + sId; }
+function programOfBatch(k) { return String(k).split("_")[0]; }
+function subOfBatch(k) { return String(k).split("_").slice(1).join("_") || "_none"; }
+function getProgramLabel(config, pId) {
+  const p = (config.programs || []).find(x => x.id === pId);
+  return p ? p.label : pId;
+}
+function getSubLabel(config, pId, sId) {
+  const p = (config.programs || []).find(x => x.id === pId);
+  if (!p) return String(sId);
+  const s = (p.subs || []).find(x => String(x.id) === String(sId));
+  return s ? s.label : String(sId);
+}
+function getProgramTheme(config, pId) {
+  const idx = (config.programs || []).findIndex(p => p.id === pId);
+  if (idx < 0) return TPL_THEME_PALETTE[0];
+  return TPL_THEME_PALETTE[idx % TPL_THEME_PALETTE.length];
+}
+function getAllBatchEntries(config) {
+  const out = [];
+  (config.programs || []).forEach(p => {
+    const subs = p.subs || [];
+    if (!subs.length) {
+      out.push({ key: makeBatchKey(p.id, "_none"), label: p.label || p.id, program: p.id, sub: "_none" });
+    } else {
+      subs.forEach(s => out.push({ key: makeBatchKey(p.id, s.id), label: (p.label || p.id) + " · " + (s.label || s.id), program: p.id, sub: s.id }));
+    }
+  });
+  return out;
+}
+
+/* =====================================================================
+   ============ SUBUH — CONSTANTS & PATH HELPERS =======================
+   ===================================================================== */
+const SUBUH_ROOT = "jepang_absensi";
+const SUBUH_BATCH_LIST = ["1","2","3","4","5","6","MM","MS","TR","A18"];
+const SUBUH_KELAS = "Shalat Subuh";
+const SUBUH_BATCH_THEME = {
+  "1": { accent:"#16a34a", accentLight:"#bbf7d0", accentDark:"#15803d", label:"Jepang Batch 1🇯🇵" },
+  "2": { accent:"#0891b2", accentLight:"#a5f3fc", accentDark:"#0e7490", label:"Jepang Batch 2🇯🇵" },
+  "3": { accent:"#10b981", accentLight:"#a7f3d0", accentDark:"#059669", label:"Jepang Batch 3🇯🇵" },
+  "4": { accent:"#0ea5e9", accentLight:"#bae6fd", accentDark:"#0284c7", label:"Jepang Batch 4🇯🇵" },
+  "5": { accent:"#f97316", accentLight:"#ffedd5", accentDark:"#ea580c", label:"Jepang Batch 5🇯🇵" },
+  "6": { accent:"#8b5cf6", accentLight:"#ddd6fe", accentDark:"#7c3aed", label:"Jepang Batch 6🇯🇵" },
+  "MM": { accent:"#d97706", accentLight:"#fde68a", accentDark:"#b45309", label:"Mekah-Madinah🇸🇦" },
+  "MS": { accent:"#dc2626", accentLight:"#fecaca", accentDark:"#b91c1c", label:"Mesir🇪🇬" },
+  "TR": { accent:"#4f46e5", accentLight:"#c7d2fe", accentDark:"#4338ca", label:"Turki🇹🇷" },
+  "A18": { accent:"#14b8a6", accentLight:"#99f6e4", accentDark:"#0d9488", label:"Angkatan 18" }
+};
+const SUBUH_BATCH_STUDENTS = {
+  "1": ["PARAMITA","NAWIYAH","SINDI NURAENI"],
+  "2": ["NURJANAH","RANTI","RISNAWATI"],
+  "3": ["KOMALASARI","NAJLA MAULIDA","DEDE RIFQI SOLEHUDIN","IRVAN NUR EVENDI","TATA PUSPITA SARI","NENENG SITI SOPIAH","PUTRI HANDAYANI","RAHMAWATI","SEFTI SUKMA SARI","SELPI FUJIANTI","RIAN LESMANA"],
+  "4": ["CINDY AULIA PUTRI","NENG AISYAH NURUL KAROMAH","YASPA ZAELANI","M.RULI","ILHAM MAULANA"],
+  "5": ["MAULANA MALIK SAPUTRA","IMPITA SARI","SANGGA NUR CAHYA","RIO RIVALDO","SELVI SALAVIAH"],
+  "6": ["ABDUL JALIL","ABDUL MUHYI","AKMAL ALGHIFARI","DELON SYAIFUL BAHRI","HENDRIS ADAMSYAH","IKHSAN KAMIL","IRPAN","MUHAMMAD FAUZI","MUHAMMAD IRFAN MUNTAHA","NANANG HASMID PUTRA","NANDANG FAUZI","OJI SAPUTRA","SAHID HAKIM","UJANG","WIJOYO","WILKI KOMARA","YUSRI","YUSUF ABDULLATIF"],
+  "MM": ["AHMAD MUPARIZ","ALYA SAIPATUL MUGHISAH","AMELIA PUTRI RAMADANI","AMIR","ARDELA PRAMUDITA","ARIL FIRMANSYAH","DELVIA MISKA UTAMI","DENDI","DEWI MULIANI BESAN","EDO MAULANA","ELAH FATMAWATI","ERNA NURBAETI","ERIK RODIBILAH","FAHRUL HIDAYAT","FAISAL RAMDANI","FARHAT ASIATUL ISLAM","FARIZ HAMAMI","FARSHA INDRA AJI SATRIA","FIRMAN LAPANDEWA","GALANG AMRIN TIHUN","HERI NURFALAH","IFAN PANDIANSYAH","IKHWAN","JEAN PAUL SUTAN","LESTARI","LIZA SEPTIANI","M. ABDUL ROHMAN FAUZIE","M. ALIYUDIN SAPUTRA","M. GIBRAN SAUQI","M. ILHAM ROTAMA","M SHOLEH HASAN","MARDIAH SALSABILIA","MARSANDA","MOH. FARHAN NAZMI AKBAR","MUHAMMAD IBNU KHOLIK","MUHAMAD MANSUR","MUHAMAD RAMDANI","MUHAMMAD DELVAN FABIANABEL","MUHAMMAD JODI IRAWAN","MUHAMMAD REHAN AWAL PRATAMA","MUHAMMAD RIYADI PANGKA","MULYOSO","NANDI SUPRIADI","NURHAYATI","QOTRUN NADA","RAFLI RIFADILAH HUSNI","RAIHAN NUR WAHID","REFAL PAHLEVI","REZA ADHITYA NUGROHO","RIDWAN MAULANA","RIPAL MAULANA","RISMA","RIZWAN MUBAROK","ROSMIATI","ROSNANI","SAGITA PRAMUDITA","SAHARA PUSPITASARI","SAKA","SARDIVA","SASI NOVITA SARI","SATRIA BIMANTARA","SITI MASLIHAH","SITI RAHMAWATI","SITI SARIPAH","SUCI MIFTAHUL JANNAH","SUDAR DAWAN","SULAEMAN","SURYADIN","TSALSA FAUZIAH","UPI MUTIA TAUFIK","WIDI PERMONO","WILDO HERIYANTO DAWAN","YOGI SUGIH MUKTI"],
+  "MS": ["AGUS SALIM","RENDI SETIAWAN","M FAIZ AFANDI","RAFI WIDYA DHANA","ADELLIANO SETIAWAN","SAPARUDIN","DEDE SUHENDAR"],
+  "TR": ["SASI NOVITA","SINTA ABIANTI","SITI ALMALIA","SUMARDANI","ABDULLAH","ABIDIN","ADITHIA PERMANA","AGUNG","AHMAD ALI MUDIN","ALAN MAULANA","ALFAIDA DAWAN","ALFIN NURLATUN","ALMAS RAMADHANI","ANISA TIHUN","APRILIANSYAH","ARIVA MUHAMMAD MUNAWAR","ASEP SUBHAN","AYU MUTIARA REGITA CAHYANI","AYU RAHMAWATI","CINTA DEWI SARTIKA","DANDI IRAWAN","DEDE GUNAWAN","DEDE NOVI NADIAH","DENDI SYAFRULLOH","DEPILA","DIAN MENTARI SUCI RAMADINI","DINA","ENDANG SUHENDI","ENDAY","ETTA AISYA MUKADAR","EVI SRI RAHAYU","FACHY FIRMANSYAH","FAKHIRA RAYNA TSANI","FARHAN FIRMANSYAH","FAUZIMAN","FIRMANSYAH (GARUT)","FIRMANSYAH (BOGOR)","FUTRI","HALIMATUSA'DIAH","HILMAN","IBRAHIM MOPIK","IKRAM SURIAH","INDA ANGGUN SARI","INDRI SEFTIYANI","INTAN PERMATA SARI","IRMA","ISWANDI","JULIANTINI PUTRI","KAMIL DAWAN","KHAIRY FAHMI","KHUSNUL KHOTIMAH","LUSI RIJKIYANTI","M RESTU ALFIAT","M SAHRUL MUTAQIN","MAHFUDZ","MAIMUNAH RAHAYAAN","MAULIDA UMI ZAKIAH F.","MUH. JEFRI","MUH. RAFLI KADIR","MUHAMAD ANWAR","MUHAMAD AZZAM NUR RAMADLAN","MUHAMAD BAMBANG","MUHAMAD FAUZI","MUHAMAD NAJRIL ILHAM","MUHAMAD SARDI","MUHAMMAD ALIFATULLAH HIPPY","MUHAMMAD LUKMAN FAJRI","MUHAMMAD NAYIB FAIRUZ","MUHAMMAD RIZQI","MUTIARA FITROTUL NAZIAH","NABILA ELSIVA","NADIATUL KHOIRIYAH","NARIZA RAZAN FATHIN MUSYARY","NAZRIL ILHAM ADITTYA","NENG SRI MARYANI","NETHA AULIA PUTRI BERMAWAN","NOVILATUL KUDSIAH","NUR HAYAT","NURAULIA FEBRIYANTI","NURIA MEILANI","NYALILING TIHUN","OMOY","PAHMI IDRIS","PRITI RAMADANI","RAHMADIA PUTRI","RAHMAT (A17)","RAHMAT (A18)","RAKHA SEFFA AZZIQRI","RANDI MAULANA","REVO MAHDAFIQIH AL-MALIQYO","RIDWAN","RIFKI PADLUR ROHMAN","RIMA ANDINI","ROUDHOTUL JANNAH","SANDRI NURBASAR","SANI SADISAH","SARFAN TIHUN","SAUFANA IS'AFBILLAH","SELILAWATI","SILVA MEDIKA","SILVIA LESTARI","SINTA","SINTIA MAHARANI","SITA AZZAHRA","SITI LUTFIYAH","SITI MULYATI","SITI NUR ALIFAH MUTMAINAH","SITI NURLAELATUL FADILAH","SITI NURPAUJIAH","SITI RAHMAH","SITI RATNA WULAN","SITI SARAH","SUCI AULIA ULFAIZAH","SUKMA ASTARI ELANG","SYIFA LAILATUL HASANAH","SYILVA SAKINATUL ULYA","TASYA SRI RAHMAWATI","UMAR BESAN","WAWAN RIADI DAWAN","WINDI MAELANI","YANRA ARDIANSYAH","ZIDAN MAULANA AZIN","AHMAD DEDY SAPUTRA","ANGGA","DHIATUR RAMADHANI","FHELIA ANUGRAH RIAGINA","GALANG HARY SATRIA","HARRY SETIAWAN","MUHAMMAD FATHUR RAHMAN","MUHMMAD DENI SAFUTRA","RIKWAN HERGAWAN","SITI NURKHOTIMAH"],
+  "A18": ["AFDAL","AHMAD AL GHANI","ANGGA","BABAN","FAIQ KHANZA GHIFAR","FUJI AKBAR","GION APRIANSYAH","HARRY SETIAWAN","HILMAN","IDEN M","M AJI AGUNG","M ALI RAMDANI","M ARBIYAN","M BILAL","M RAHMAT","MOCH AHDAN","MOH FAHMI","M DAMAR","MUHAMMAD DENI SAFUTRA","M DOUZAN","MUHAMMAD FATHUR RAHMAN","M HANIF","M RIZAL","M SYKHONI","MUHAMMAD RABBANI","RAYAN ALI MUMTAZ","RIKWAN HERGAWAN","RIKZA","SADANGE BELEN","SAPRUDIN","SAHLAN","SURYA","U SYARIF","YAHYA ZAKARIA","AANG MAKI"]
+};
+function subuhStudentsPath(b) { return `${SUBUH_ROOT}/batch_${b}/students`; }
+function subuhAttendancePath(b, ds) { return `${SUBUH_ROOT}/batch_${b}/attendance/${ds}/Shalat_Subuh`; }
+
+/* =====================================================================
+   ============ TEMPLATE DASHBOARD =====================================
+   ===================================================================== */
+function TemplateDashboard({ onExit }) {
+  const [phase, setPhase] = useState("room");
+const [roomCode, setRoomCode] = useState("");
+const [roomName, setRoomName] = useState("");
+
+/* === Daftar kelas real-time === */
+const [roomsList, setRoomsList] = useState([]);
+const [roomsLoading, setRoomsLoading] = useState(true);
+const [roomsError, setRoomsError] = useState("");
+const [enteringCode, setEnteringCode] = useState("");
+const [lastRoom, setLastRoom] = useState(() => { try { return localStorage.getItem("dash_tpl_last_room") || ""; } catch { return ""; } });
+
+  const [programConfig, setProgramConfig] = useState(makeDefaultProgramConfig());
+  const [generalSettings, setGeneralSettings] = useState({ waNumber: "6285896639315" });
+
+  const [dashMonth, setDashMonth] = useState(() => new Date().getMonth());
+  const [dashYear, setDashYear] = useState(() => new Date().getFullYear());
+  const [dashWholeMonth, setDashWholeMonth] = useState(true);
+  const [dashWeeks, setDashWeeks] = useState([1,2,3,4]);
+  const [dashBatchKey, setDashBatchKey] = useState("");
+  const [dashboardData, setDashboardData] = useState(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+
+  const [showSalinRekap, setShowSalinRekap] = useState(false);
+  const [salinRekapRange, setSalinRekapRange] = useState("1w");
+  const [salinRekapStart, setSalinRekapStart] = useState(() => dateOffsetStr(new Date(), -6));
+  const [salinRekapEnd, setSalinRekapEnd] = useState(() => toInputDate(new Date()));
+  const [salinRekapSelected, setSalinRekapSelected] = useState({});
+  const [salinRekapBusy, setSalinRekapBusy] = useState(false);
+  const [salinRekapMonth, setSalinRekapMonth] = useState(() => new Date().getMonth());
+  const [salinRekapYear, setSalinRekapYear] = useState(() => new Date().getFullYear());
+
+  const [previewText, setPreviewText] = useState("");
+  const [previewLabel, setPreviewLabel] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
+  const taRef = useRef(null);
+
+  const [toastMsg, setToastMsg] = useState("");
+  const [toastVisible, setToastVisible] = useState(false);
+  const toast = (msg) => { setToastMsg(msg); setToastVisible(true); setTimeout(() => setToastVisible(false), 2800); };
+
+  const allBatchEntries = useMemo(() => getAllBatchEntries(programConfig), [programConfig]);
+  const allBatchKeys = useMemo(() => allBatchEntries.map(e => e.key), [allBatchEntries]);
+
+  useEffect(() => {
+    if (!dashBatchKey && allBatchKeys.length) setDashBatchKey(allBatchKeys[0]);
+  }, [allBatchKeys, dashBatchKey]);
+  
+  /* === Real-time: daftar kelas di TEMPLATE ABSEN/rooms === */
+useEffect(() => {
+  if (phase !== "room") return;
+  setRoomsLoading(true);
+  setRoomsError("");
+  const roomsRef = db.ref(`${TPL_ROOT}/rooms`);
+  const handler = roomsRef.on("value", (snap) => {
+    const val = snap.val() || {};
+    const list = Object.keys(val)
+      .filter((code) => val[code] && val[code].info)
+      .map((code) => ({
+        code,
+        name: String((val[code].info && val[code].info.name) || code).trim() || code
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, "id"));
+    setRoomsList(list);
+    setRoomsLoading(false);
+  }, () => {
+    setRoomsError("Gagal memuat daftar kelas. Cek koneksi.");
+    setRoomsLoading(false);
+  });
+  return () => roomsRef.off("value", handler);
+}, [phase]);
+
+  const enterRoom = async (codeParam) => {
+  const code = String(codeParam || "").trim().toUpperCase();
+  if (!code) return;
+  setEnteringCode(code);
+  try {
+    const infoSnap = await db.ref(tplRoomInfoPath(code)).once("value");
+    const info = infoSnap.val();
+    if (!info) { toast("⚠️ Kelas tidak ditemukan"); setEnteringCode(""); return; }
+    const [cfgSnap, genSnap] = await Promise.all([
+      db.ref(`${tplBasePath(code)}/meta/program_config`).once("value"),
+      db.ref(`${tplBasePath(code)}/meta/general_settings`).once("value")
+    ]);
+    const cfg = normalizeProgramConfig(cfgSnap.val());
+    const gen = genSnap.val() || {};
+    setProgramConfig(cfg);
+    setGeneralSettings({ waNumber: String(gen.waNumber || "6285896639315") });
+    setRoomCode(code);
+    setRoomName(info.name || code);
+    try { localStorage.setItem("dash_tpl_last_room", code); setLastRoom(code); } catch {}
+    setPhase("ready");
+  } catch {
+    toast("⚠️ Gagal terhubung ke kelas");
+  }
+  setEnteringCode("");
+};
+
+  const getDateList = () => {
+    const daysInMonth = new Date(dashYear, dashMonth + 1, 0).getDate();
+    if (dashWholeMonth) {
+      const s = `${dashYear}-${String(dashMonth+1).padStart(2,"0")}-01`;
+      const e = `${dashYear}-${String(dashMonth+1).padStart(2,"0")}-${String(daysInMonth).padStart(2,"0")}`;
+      return eachDateStr(s, e);
+    }
+    const ranges = weekRangesInMonth(dashYear, dashMonth).filter(r => dashWeeks.includes(r.week));
+    const list = [];
+    ranges.forEach(r => eachDateStr(r.start, r.end).forEach(d => list.push(d)));
+    return [...new Set(list)].sort();
+  };
+
+  const buildMatrixForBatch = async (k, dateList) => {
+    let ns = null;
+    try { ns = await db.ref(tplStudentsPath(roomCode, k)).once("value"); } catch {}
+    let names = ns && ns.val();
+    if (!Array.isArray(names) || !names.length) names = [];
+    names = names.map(n => String(n).trim()).filter(Boolean).sort((a,c) => a.localeCompare(c, "id"));
+    const matrix = {};
+    names.forEach(n => { matrix[n] = {}; });
+    await Promise.all(dateList.map(ds =>
+      db.ref(tplAttendancePath(roomCode, k, ds)).once("value").then(snap => {
+        const val = snap.val() || {};
+        names.forEach(n => {
+          let st = null;
+          const item = val[toFbKey(n)] !== undefined ? val[toFbKey(n)] : val[n];
+          if (item && typeof item === "object") st = normalizeStatus(item.status);
+          else if (typeof item === "string") st = normalizeStatus(item);
+          matrix[n][ds] = st;
+        });
+      }).catch(() => { names.forEach(n => { matrix[n][ds] = matrix[n][ds] || null; }); })
+    ));
+    const totals = {};
+    names.forEach(n => {
+      const t = { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+      dateList.forEach(ds => { const st = matrix[n][ds]; if (st && t[st] !== undefined) t[st]++; });
+      totals[n] = t;
+    });
+    return { names, matrix, totals };
+  };
+
+  const sheetNameFor = (k) => {
+    const p = programOfBatch(k), s = subOfBatch(k);
+    const label = getProgramLabel(programConfig, p) + " " + getSubLabel(programConfig, p, s);
+    return String(label).replace(/[\\\/\?\*\[\]]/g, " ").slice(0, 31);
+  };
+
+  const openDashboard = async () => {
+    if (!dashBatchKey) return toast("⚠️ Pilih batch dulu");
+    setDashboardLoading(true); setDashboardData(null);
+    try {
+      const dateList = getDateList();
+      if (!dateList.length) { setDashboardData({ error: "Tidak ada tanggal" }); setDashboardLoading(false); return; }
+      const { names, matrix, totals } = await buildMatrixForBatch(dashBatchKey, dateList);
+      const p = programOfBatch(dashBatchKey), s = subOfBatch(dashBatchKey);
+      const label = getProgramLabel(programConfig, p) + " · " + getSubLabel(programConfig, p, s);
+      setDashboardData({ start: dateList[0], end: dateList[dateList.length-1], dates: dateList, matrix, totals, names, batchKey: dashBatchKey, batchLabel: label, days: dateList.length });
+    } catch { setDashboardData({ error: "Gagal load data" }); }
+    setDashboardLoading(false);
+  };
+
+  const buildRekapTextFor = async (k, dateList) => {
+    const { names, matrix } = await buildMatrixForBatch(k, dateList);
+    if (!names.length) return null;
+    const p = programOfBatch(k), s = subOfBatch(k);
+    const label = getProgramLabel(programConfig, p) + (s !== "_none" ? " · " + getSubLabel(programConfig, p, s) : "");
+    const d0 = dateList[0], dN = dateList[dateList.length - 1];
+    const [y0, m0, day0] = d0.split("-").map(Number);
+    const [yN, mN, dayN] = dN.split("-").map(Number);
+    let dateLabel;
+    if (y0 === yN && m0 === mN) dateLabel = `${day0}-${dayN}`;
+    else if (y0 === yN) dateLabel = `${day0} ${MONTH_NAMES_ID[m0-1]} - ${dayN} ${MONTH_NAMES_ID[mN-1]}`;
+    else dateLabel = `${day0}/${m0}/${y0} - ${dayN}/${mN}/${yN}`;
+    let t = `Rekapan (${label})\nTanggal: ${dateLabel}\n`;
+    names.forEach((name, i) => {
+      const emojis = dateList.map(ds => {
+        const st = matrix[name] && matrix[name][ds];
+        if (st === "HADIR") return "✅";
+        if (st === "SAKIT") return "🆘";
+        if (st === "IZIN") return "ℹ️";
+        if (st === "ALFA") return "❌";
+        return "⬜";
+      }).join("");
+      t += `${i + 1}. ${name} ${emojis}\n`;
+    });
+    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum`;
+    return t;
+  };
+
+  const handleSalinRekapRangeChange = (range) => {
+    setSalinRekapRange(range);
+    if (range === "custom") {
+      let dl = [];
+      try { dl = getDateList(); } catch {}
+      if (!dl.length) dl = [dateOffsetStr(new Date(), -6), toInputDate(new Date())];
+      setSalinRekapStart(dl[0]);
+      setSalinRekapEnd(dl[dl.length - 1]);
+    }
+  };
+
+  const doSalinRekap = async () => {
+    setSalinRekapBusy(true);
+    try {
+      let dateList = [];
+      const today = new Date();
+      if (salinRekapRange === "1w") { for (let i = 6; i >= 0; i--) dateList.push(dateOffsetStr(today, -i)); }
+      else if (salinRekapRange === "2w") { for (let i = 13; i >= 0; i--) dateList.push(dateOffsetStr(today, -i)); }
+      else if (salinRekapRange === "1m") {
+        const daysInMonth = new Date(salinRekapYear, salinRekapMonth + 1, 0).getDate();
+        const s = `${salinRekapYear}-${String(salinRekapMonth+1).padStart(2,"0")}-01`;
+        const e = `${salinRekapYear}-${String(salinRekapMonth+1).padStart(2,"0")}-${String(daysInMonth).padStart(2,"0")}`;
+        dateList = eachDateStr(s, e);
+      } else {
+        if (!salinRekapStart || !salinRekapEnd) { toast("⚠️ Pilih tanggal"); setSalinRekapBusy(false); return; }
+        if (salinRekapStart > salinRekapEnd) { toast("⚠️ Tanggal mulai harus sebelum akhir"); setSalinRekapBusy(false); return; }
+        dateList = eachDateStr(salinRekapStart, salinRekapEnd);
+      }
+      if (!dateList.length) { toast("⚠️ Tidak ada tanggal"); setSalinRekapBusy(false); return; }
+      const selectedKeys = Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]);
+      if (!selectedKeys.length) { toast("⚠️ Pilih minimal 1 batch"); setSalinRekapBusy(false); return; }
+      let text = "";
+      if (selectedKeys.length === 1) {
+        text = await buildRekapTextFor(selectedKeys[0], dateList);
+        if (!text) { toast("⚠️ Tidak ada siswa"); setSalinRekapBusy(false); return; }
+      } else {
+        const blocks = [];
+        for (const k of selectedKeys) { try { const b = await buildRekapTextFor(k, dateList); if (b) blocks.push(b); } catch {} }
+        if (!blocks.length) { toast("⚠️ Tidak ada data"); setSalinRekapBusy(false); return; }
+        text = blocks.join("\n\n━━━━━━━━━━━━━━━\n\n");
+      }
+      const labels = { "1w":"1 Minggu", "2w":"2 Minggu", "1m":"1 Bulan", "custom":"Custom" };
+      setPreviewText(text); setPreviewLabel("Rekap " + labels[salinRekapRange]);
+      setShowSalinRekap(false); setShowPreview(true);
+      setTimeout(() => { if (taRef.current) { taRef.current.focus(); taRef.current.select(); } }, 120);
+      const ok = await copyText(text);
+      toast(ok ? "✅ Rekap disalin!" : "⚠️ Salin manual via preview");
+    } catch { toast("⚠️ Gagal menyusun rekap"); }
+    setSalinRekapBusy(false);
+  };
+
+  const exportAllXlsxRapi = async () => {
+    if (!allBatchKeys.length) return toast("⚠️ Belum ada batch");
+    if (typeof ExcelJS === "undefined") return toast("⚠️ ExcelJS belum termuat, refresh");
+    const dateList = getDateList();
+    if (!dateList.length) return toast("⚠️ Pilih periode dulu");
+    setExportBusy(true); toast("⏳ Menyusun rekap…");
+    try {
+      const allRows = [];
+      for (const k of allBatchKeys) {
+        const { names, matrix, totals } = await buildMatrixForBatch(k, dateList);
+        if (!names.length) continue;
+        const sheetLabel = sheetNameFor(k);
+        names.forEach(n => {
+          const t = totals[n] || { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+          const days = dateList.map(ds => statusShort((matrix[n] && matrix[n][ds]) || null));
+          allRows.push({ program: sheetLabel, nama: n, days, h: t.HADIR||0, i: t.IZIN||0, s: t.SAKIT||0, a: t.ALFA||0 });
+        });
+      }
+      if (!allRows.length) { setExportBusy(false); return toast("⚠️ Tidak ada data"); }
+
+      const dayCount = dateList.length;
+      const start = dateList[0], end = dateList[dateList.length-1];
+      const monthLabel = MONTH_NAMES_ID[dashMonth];
+      const year = dashYear;
+
+      const workbook = new ExcelJS.Workbook();
+      const ws = workbook.addWorksheet("Rekap Absensi Gabungan");
+      const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F4E79" } };
+      const headerFont = { name: "Arial", bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
+      const normalFont = { name: "Arial", size: 9 };
+      const titleFont = { name: "Arial", bold: true, size: 14, color: { argb: "FF1F4E79" } };
+      const subtitleFont = { name: "Arial", bold: true, size: 11 };
+      const thinBorder = { top:{style:"thin"}, left:{style:"thin"}, bottom:{style:"thin"}, right:{style:"thin"} };
+      const fillH = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+      const fillI = { type: "pattern", pattern: "solid", fgColor: { argb: "FFBDD7EE" } };
+      const fillS = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2D5F1" } };
+      const fillA = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } };
+      const totalCols = 3 + dayCount + 4;
+
+      ws.mergeCells(1, 1, 1, totalCols);
+      const titleCell = ws.getCell(1, 1);
+      titleCell.value = `REKAP ABSENSI SEMUA PROGRAM - ${String(monthLabel).toUpperCase()} ${year}`;
+      titleCell.font = titleFont;
+      titleCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      ws.mergeCells(2, 1, 2, totalCols);
+      const subCell = ws.getCell(2, 1);
+      subCell.value = `Periode: ${start} s.d. ${end} | ${roomName} | Digabung dari semua batch`;
+      subCell.font = subtitleFont;
+      subCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const headers = ["No", "Program", "Nama"];
+      dateList.forEach(ds => headers.push(ds.slice(8)));
+      headers.push("H", "I", "S", "A");
+      const headerRow = ws.getRow(4);
+      headers.forEach((h, i) => {
+        const cell = headerRow.getCell(i + 1);
+        cell.value = h; cell.font = headerFont; cell.fill = headerFill;
+        cell.alignment = { horizontal: "center", vertical: "middle" }; cell.border = thinBorder;
+      });
+      headerRow.height = 22;
+
+      allRows.forEach((r, idx) => {
+        const row = ws.getRow(idx + 5);
+        const c1 = row.getCell(1); c1.value = idx+1; c1.font = normalFont; c1.alignment = {horizontal:"center",vertical:"middle"}; c1.border = thinBorder;
+        const c2 = row.getCell(2); c2.value = r.program; c2.font = normalFont; c2.alignment = {horizontal:"center",vertical:"middle"}; c2.border = thinBorder;
+        const c3 = row.getCell(3); c3.value = r.nama; c3.font = normalFont; c3.alignment = {horizontal:"left",vertical:"middle"}; c3.border = thinBorder;
+        r.days.forEach((val, dIdx) => {
+          const cell = row.getCell(4 + dIdx);
+          cell.value = val; cell.font = normalFont; cell.alignment = {horizontal:"center",vertical:"middle"}; cell.border = thinBorder;
+          if (val === "H") cell.fill = fillH;
+          else if (val === "I") cell.fill = fillI;
+          else if (val === "S") cell.fill = fillS;
+          else if (val === "A") cell.fill = fillA;
+        });
+        [r.h, r.i, r.s, r.a].forEach((val, tIdx) => {
+          const cell = row.getCell(4 + dayCount + tIdx);
+          cell.value = val; cell.font = normalFont; cell.alignment = {horizontal:"center",vertical:"middle"}; cell.border = thinBorder;
+          if (val > 0) cell.fill = [fillH, fillI, fillS, fillA][tIdx];
+        });
+      });
+
+      ws.getColumn(1).width = 5; ws.getColumn(2).width = 22; ws.getColumn(3).width = 28;
+      for (let i = 4; i < 4 + dayCount; i++) ws.getColumn(i).width = 3.5;
+      for (let i = 4 + dayCount; i < 4 + dayCount + 4; i++) ws.getColumn(i).width = 4.5;
+
+      const legendStart = 4 + allRows.length + 2;
+      ws.getCell(legendStart, 1).value = "Keterangan:";
+      ws.getCell(legendStart, 1).font = { name: "Arial", bold: true, size: 10 };
+      [["H","= Hadir (Hijau)",fillH],["I","= Izin (Biru)",fillI],["S","= Sakit (Ungu)",fillS],["A","= Alpha (Merah)",fillA],["-","= Tidak ada data / Libur",null]].forEach((leg, i) => {
+        const cell = ws.getCell(legendStart + 1 + i, 1);
+        cell.value = leg[0]; if (leg[2]) cell.fill = leg[2];
+        cell.border = thinBorder; cell.alignment = { horizontal: "center" };
+        cell.font = { name: "Arial", bold: true, size: 9 };
+        ws.getCell(legendStart + 1 + i, 2).value = leg[1];
+        ws.getCell(legendStart + 1 + i, 2).font = normalFont;
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url;
+      a.download = `Rekap_${roomName.replace(/[^A-Za-z0-9]/g,"_")}_${monthLabel}_${year}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast("✅ Excel diunduh");
+    } catch (err) { console.error(err); toast("⚠️ Gagal ekspor: " + (err.message || "")); }
+    setExportBusy(false);
+  };
+
+  // === PILIH KELAS (real-time) ===
+if (phase === "room") {
+  return h("div", { style:{ minHeight:"100vh", display:"flex", flexDirection:"column", background:"linear-gradient(135deg, #f0f9ff 0%, #c7d2fe 100%)" } }, [
+    h("div", { style:{ padding:"14px 20px" } },
+      h("button", {
+        onClick: onExit,
+        style:{ height:36, padding:"0 16px", borderRadius:10, border:"1px solid rgba(0,0,0,.12)", background:"#fff", fontWeight:800, fontSize:12, cursor:"pointer" }
+      }, "← Kembali ke Pilihan")
+    ),
+    h("div", { style:{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", padding:16 } }, [
+      h("div", { style:{ width:"100%", maxWidth:540, borderRadius:28, background:"#fff", boxShadow:"0 20px 60px -12px rgba(0,0,0,.35)", padding:32, animation:"scaleIn .3s ease", display:"flex", flexDirection:"column", maxHeight:"88vh" } }, [
+
+        h("div", { style:{ textAlign:"center", marginBottom:24, flexShrink:0 } }, [
+          h("div", { style:{ width:64, height:64, borderRadius:20, background:"#7c3aed", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:900, fontSize:28, margin:"0 auto 12px" } }, "📚"),
+          h("div", { style:{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" } }, "Pilih Kelas"),
+          h("div", { style:{ fontSize:12, fontWeight:600, color:"#94a3b8", marginTop:6, letterSpacing:"0.08em" } }, "TEMPLATE ABSENSI · REAL-TIME")
+        ]),
+
+        roomsLoading
+          ? h("div", { style:{ textAlign:"center", padding:40, color:"#64748b", fontWeight:700, fontSize:13 } }, "⏳ Memuat daftar kelas…")
+          : roomsError
+            ? h("div", { style:{ padding:"12px 14px", borderRadius:12, background:"#fef2f2", border:"1px solid #fecaca", color:"#991b1b", fontSize:13, fontWeight:700, textAlign:"center" } }, "⚠️ " + roomsError)
+            : roomsList.length === 0
+              ? h("div", { style:{ textAlign:"center", padding:40, color:"#94a3b8", fontWeight:600, fontSize:13, lineHeight:1.6 } }, [
+                  h("div", { style:{ fontSize:32, marginBottom:8 } }, "📭"),
+                  "Belum ada kelas tersedia.",
+                  h("div", { style:{ fontSize:11, marginTop:6, color:"#cbd5e1" } }, "Daftar akan update otomatis")
+                ])
+              : h("div", { style:{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4 } },
+                  roomsList.map((r) => {
+                    const isEntering = enteringCode === r.code;
+                    const isLast = lastRoom === r.code;
+                    return h("button", {
+                      key: r.code,
+                      onClick: () => enterRoom(r.code),
+                      disabled: !!enteringCode,
+                      style: {
+                        display:"flex", alignItems:"center", gap:12, padding:"12px 14px",
+                        borderRadius:14,
+                        border: isLast ? "2px solid #7c3aed" : "1px solid #e2e8f0",
+                        background: isLast ? "#f5f3ff" : "#fff",
+                        cursor: enteringCode ? "wait" : "pointer",
+                        opacity: enteringCode && !isEntering ? 0.5 : 1,
+                        textAlign:"left", width:"100%",
+                        transition:"all .15s"
+                      },
+                      onMouseEnter: (e) => { if (!enteringCode) { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.borderColor = "#c7d2fe"; } },
+                      onMouseLeave: (e) => { e.currentTarget.style.background = isLast ? "#f5f3ff" : "#fff"; e.currentTarget.style.borderColor = isLast ? "#7c3aed" : "#e2e8f0"; }
+                    }, [
+                      h("div", { style:{ width:40, height:40, borderRadius:12, background:"#7c3aed", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:900, fontSize:16, flexShrink:0 } }, "📖"),
+                      h("div", { style:{ flex:1, minWidth:0 } }, [
+                        h("div", { style:{ fontSize:14, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" } }, r.name),
+                        h("div", { style:{ fontSize:11, fontWeight:700, color:"#94a3b8", marginTop:2, letterSpacing:"0.06em" } }, r.code)
+                      ]),
+                      isEntering
+                        ? h("div", { style:{ fontSize:11, fontWeight:800, color:"#7c3aed" } }, "⏳")
+                        : isLast
+                          ? h("div", { style:{ fontSize:10, fontWeight:900, padding:"3px 8px", borderRadius:999, background:"#ddd6fe", color:"#6d28d9", letterSpacing:"0.03em" } }, "TERAKHIR")
+                          : h("div", { style:{ fontSize:16, color:"#cbd5e1", fontWeight:900 } }, "→")
+                    ]);
+                  })
+                ),
+
+        h("div", { style:{ marginTop:16, textAlign:"center", fontSize:11, color:"#cbd5e1", fontWeight:600, letterSpacing:"0.06em", flexShrink:0 } },
+          roomsList.length > 0
+            ? roomsList.length + " kelas tersedia · Klik untuk masuk"
+            : "Template Multi-Kelas · Mode Admin"
+        )
+      ])
+    ])
+  ]);
+}
+
+  // === DASHBOARD ===
+  const dashHasMatrix = dashboardData && dashboardData.matrix;
+  const activeTheme = getProgramTheme(programConfig, programOfBatch(dashBatchKey));
+
+  return h("div", { style:{ minHeight:"100vh", background:"#f1f5f9", paddingBottom:40 } }, [
+    h("div", { style:{ background:"#0f172a", color:"#fff", padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, boxShadow:"0 4px 20px rgba(0,0,0,.15)", position:"sticky", top:0, zIndex:30 } }, [
+      h("div", { style:{ display:"flex", alignItems:"center", gap:12 } }, [
+        h("button", {
+          onClick: onExit,
+          style:{ height:36, width:36, borderRadius:10, border:"1px solid rgba(255,255,255,.2)", background:"rgba(255,255,255,.1)", color:"#fff", fontWeight:900, fontSize:16, cursor:"pointer" }
+        }, "←"),
+        h("div", { style:{ width:40, height:40, borderRadius:12, background:"#7c3aed", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 } }, "📚"),
+        h("div", null, [
+          h("div", { style:{ fontSize:15, fontWeight:900 } }, "Dashboard Template"),
+          h("div", { style:{ fontSize:11, fontWeight:600, color:"rgba(255,255,255,.6)", letterSpacing:"0.06em" } }, roomName + " · " + roomCode)
+        ])
+      ]),
+      h("button", {
+        onClick: () => { setPhase("room"); setDashboardData(null); setSalinRekapSelected({}); },
+        style:{ height:36, padding:"0 16px", borderRadius:10, border:"1px solid rgba(255,255,255,.2)", background:"rgba(255,255,255,.1)", color:"#fff", fontWeight:800, fontSize:12, cursor:"pointer" }
+      }, "🔄 Ganti Kelas")
+    ]),
+
+    h("div", { style:{ maxWidth:1100, margin:"0 auto", padding:"20px 16px 0" } }, [
+      h("div", { style:{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #e2e8f0", boxShadow:"0 8px 30px rgba(0,0,0,.04)", marginBottom:16 } }, [
+        h("div", { style:{ fontSize:15, fontWeight:800, marginBottom:14 } }, "🗓️ Pilih Periode"),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:10, alignItems:"center", marginBottom:12 } }, [
+          h("label", { style:{ fontSize:13, fontWeight:700, display:"flex", alignItems:"center", gap:8 } }, [
+            "📅 Bulan",
+            h("select", {
+              value: `${dashYear}-${String(dashMonth+1).padStart(2,"0")}`,
+              onChange: e => { const [y,m] = e.target.value.split("-").map(Number); setDashYear(y); setDashMonth(m-1); },
+              style: { padding:"8px 12px", borderRadius:10, border:"1px solid #cbd5e1", fontWeight:700, fontSize:13, background:"#fff" }
+            }, (() => {
+              const now = new Date(); const opts = [];
+              for (let yi = now.getFullYear(); yi >= now.getFullYear()-2; yi--) for (let mi = 0; mi < 12; mi++) {
+                const val = `${yi}-${String(mi+1).padStart(2,"0")}`;
+                opts.push(h("option", { key: val, value: val }, MONTH_NAMES_ID[mi] + " " + yi));
+              }
+              return opts;
+            })())
+          ]),
+          h("label", { style:{ display:"inline-flex", alignItems:"center", gap:6, padding:"8px 14px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background: dashWholeMonth ? "rgba(34,197,94,.12)" : "#fff", cursor:"pointer" } }, [
+            h("input", { type:"checkbox", checked: dashWholeMonth, onChange: e => setDashWholeMonth(e.target.checked) }),
+            "📆 Keseluruhan bulan"
+          ])
+        ]),
+        !dashWholeMonth && h("div", { style:{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:12 } },
+          [1,2,3,4].map(w =>
+            h("label", { key: w, style:{ display:"inline-flex", alignItems:"center", gap:4, padding:"6px 12px", borderRadius:9, border:"1px solid #e2e8f0", fontSize:12, fontWeight:700, background: dashWeeks.includes(w) ? "rgba(59,130,246,.12)" : "#fff", cursor:"pointer" } }, [
+              h("input", { type:"checkbox", checked: dashWeeks.includes(w), onChange: e => setDashWeeks(prev => e.target.checked ? [...prev, w].sort() : prev.filter(x => x !== w)) }),
+              "Minggu " + w
+            ])
+          )
+        ),
+        h("div", { style:{ fontSize:11, fontWeight:800, color:"#94a3b8", letterSpacing:"0.06em", marginBottom:8, marginTop:8 } }, "PREVIEW BATCH"),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:14 } },
+          allBatchKeys.length === 0 && h("div", { style:{ fontSize:12, color:"#94a3b8", fontWeight:600 } }, "Belum ada batch"),
+          allBatchKeys.map(k => {
+            const p = programOfBatch(k), s = subOfBatch(k);
+            const th = getProgramTheme(programConfig, p);
+            const active = dashBatchKey === k;
+            return h("button", {
+              key: k, onClick: () => setDashBatchKey(k),
+              style: { height:36, padding:"0 14px", borderRadius:999, fontSize:12, fontWeight:800, border: active ? "none" : "1px solid #cbd5e1", background: active ? th.accent : "#fff", color: active ? "#fff" : "#475569", cursor:"pointer" }
+            }, (getProgramLabel(programConfig, p) + " · " + getSubLabel(programConfig, p, s)));
+          })
+        ),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:8 } }, [
+          h("button", {
+            onClick: openDashboard, disabled: dashboardLoading,
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"none", background: activeTheme.accent, color:"#fff", fontWeight:800, fontSize:13, cursor: dashboardLoading ? "wait" : "pointer", opacity: dashboardLoading ? 0.6 : 1 }
+          }, dashboardLoading ? "⏳ Memuat…" : "Tampilkan Rekap"),
+          h("button", {
+            onClick: () => {
+              if (Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]).length === 0 && dashBatchKey) setSalinRekapSelected({ [dashBatchKey]: true });
+              setShowSalinRekap(true);
+            },
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"1px solid #cbd5e1", background:"#fff", color:"#0f172a", fontWeight:800, fontSize:13, cursor:"pointer" }
+          }, "📋 Salin Rekap"),
+          h("button", {
+            onClick: exportAllXlsxRapi, disabled: exportBusy,
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"1px solid #16a34a", background:"#f0fdf4", color:"#15803d", fontWeight:800, fontSize:13, cursor: exportBusy ? "wait" : "pointer", opacity: exportBusy ? 0.6 : 1 }
+          }, exportBusy ? "⏳ Menyusun Excel…" : "📥 Ekspor Excel Gabungan")
+        ]),
+        h("div", { style:{ fontSize:11, color:"#94a3b8", fontWeight:600, marginTop:10, lineHeight:1.5 } },
+          "💡 Ekspor Excel = SEMUA batch digabung 1 sheet. Salin Rekap = pilih batch sendiri.")
+      ]),
+
+      dashboardLoading && h("div", { style:{ textAlign:"center", padding:40, color:"#64748b", fontWeight:700 } }, "⏳ Memuat data…"),
+      !dashboardLoading && dashboardData && dashboardData.error && h("div", { style:{ padding:20, borderRadius:16, background:"#fef2f2", border:"1px solid #fecaca", color:"#b91c1c", fontWeight:700, textAlign:"center" } }, dashboardData.error),
+      !dashboardLoading && dashHasMatrix && h("div", { style:{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #e2e8f0", boxShadow:"0 8px 30px rgba(0,0,0,.04)" } }, [
+        h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10, marginBottom:12 } }, [
+          h("div", null, [
+            h("div", { style:{ fontSize:15, fontWeight:800 } }, "📊 " + dashboardData.batchLabel),
+            h("div", { style:{ fontSize:12, color:"#64748b", fontWeight:600, marginTop:2 } }, `Periode ${dashboardData.start} → ${dashboardData.end} (${dashboardData.days} hari) · ${dashboardData.names.length} siswa`)
+          ]),
+          h("div", { style:{ fontSize:11, color:"#94a3b8", fontWeight:700 } }, "H=Hadir · I=Izin · S=Sakit · A=Alfa")
+        ]),
+        h("div", { style:{ overflowX:"auto", maxHeight:"62vh", overflowY:"auto", border:"1px solid #e2e8f0", borderRadius:12 } },
+          h("table", { style:{ borderCollapse:"collapse", fontSize:11, minWidth:"100%" } }, [
+            h("thead", null,
+              h("tr", { style:{ position:"sticky", top:0, background:"#f8fafc", zIndex:2 } }, [
+                h("th", { style:{ textAlign:"left", padding:"10px 8px", borderBottom:"2px solid #e2e8f0", position:"sticky", left:0, background:"#f8fafc", zIndex:3, minWidth:150 } }, "Nama"),
+                ...dashboardData.dates.map(ds => h("th", { key: ds, style:{ textAlign:"center", padding:"6px 4px", borderBottom:"2px solid #e2e8f0", minWidth:30, fontWeight:800 }, title: ds }, ds.slice(8))),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#16a34a" } }, "H"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#2563eb" } }, "I"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#ca8a04" } }, "S"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#dc2626" } }, "A")
+              ])
+            ),
+            h("tbody", null,
+              dashboardData.names.length === 0 && h("tr", null, h("td", { colSpan: 5 + dashboardData.dates.length, style:{ textAlign:"center", padding:24, color:"#94a3b8", fontWeight:600 } }, "Belum ada siswa")),
+              dashboardData.names.map((n, idx) => {
+                const t = dashboardData.totals[n] || { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+                return h("tr", { key: n, style:{ borderBottom:"1px solid #f1f5f9", background: idx % 2 === 0 ? "#fff" : "#fafbff" } }, [
+                  h("td", { style:{ padding:"6px 8px", fontWeight:700, position:"sticky", left:0, background: idx % 2 === 0 ? "#fff" : "#fafbff", whiteSpace:"nowrap" } }, n),
+                  ...dashboardData.dates.map(ds => {
+                    const st = (dashboardData.matrix[n] && dashboardData.matrix[n][ds]) || null;
+                    let bg = "transparent", color = "#94a3b8";
+                    if (st === "HADIR") { bg = "#dcfce7"; color = "#166534"; }
+                    else if (st === "IZIN") { bg = "#dbeafe"; color = "#1e40af"; }
+                    else if (st === "SAKIT") { bg = "#f3e8ff"; color = "#6b21a8"; }
+                    else if (st === "ALFA") { bg = "#fee2e2"; color = "#991b1b"; }
+                    return h("td", { key: ds, title: ds + (st ? (" · " + st) : " · Kosong"), style:{ textAlign:"center", padding:"4px 2px", background: bg, color, fontWeight:800, fontSize:10 } }, statusShort(st));
+                  }),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#16a34a", padding:"4px 6px" } }, t.HADIR),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#2563eb", padding:"4px 6px" } }, t.IZIN),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#ca8a04", padding:"4px 6px" } }, t.SAKIT),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#dc2626", padding:"4px 6px" } }, t.ALFA)
+                ]);
+              })
+            )
+          ])
+        )
+      ])
+    ]),
+
+    showSalinRekap && h("div", { style:{ position:"fixed", inset:0, zIndex:220, display:"flex", alignItems:"center", justifyContent:"center", padding:16 } }, [
+      h("div", { onClick: () => { if (!salinRekapBusy) setShowSalinRekap(false); }, style:{ position:"absolute", inset:0, background:"rgba(0,0,0,.5)", backdropFilter:"blur(6px)" } }),
+      h("div", { style:{ position:"relative", width:"100%", maxWidth:460, maxHeight:"92vh", overflowY:"auto", borderRadius:24, background:"#fff", padding:24, boxShadow:"0 20px 60px -12px rgba(0,0,0,.4)", animation:"scaleIn .25s ease" } }, [
+        h("button", { onClick: () => { if (!salinRekapBusy) setShowSalinRekap(false); }, style:{ position:"absolute", right:12, top:12, width:32, height:32, borderRadius:999, background:"#f4f4f5", border:"none", color:"#71717a", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14 } }, "✕"),
+        h("div", { style:{ fontSize:16, fontWeight:800, marginBottom:6, paddingRight:30 } }, "📋 Salin Rekap"),
+        h("div", { style:{ fontSize:13, color:"#64748b", marginBottom:16, lineHeight:1.45 } }, "Pilih rentang tanggal."),
+        h("div", { style:{ display:"grid", gap:6, marginBottom:12 } },
+          [
+            { id:"1w", label:"1 Minggu", desc:"7 hari terakhir" },
+            { id:"2w", label:"2 Minggu", desc:"14 hari terakhir" },
+            { id:"1m", label:"1 Bulan", desc:"Bulan " + MONTH_NAMES_ID[salinRekapMonth] + " " + salinRekapYear },
+            { id:"custom", label:"Custom", desc:"Pilih tanggal mulai & akhir" }
+          ].map(opt =>
+            h("button", {
+              key: opt.id, onClick: () => handleSalinRekapRangeChange(opt.id),
+              style: { display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, width:"100%", textAlign:"left", cursor:"pointer",
+                border: salinRekapRange === opt.id ? "2px solid #3b82f6" : "1px solid #e2e8f0",
+                background: salinRekapRange === opt.id ? "#eff6ff" : "#fff" }
+            }, [
+              h("div", { style:{ width:20, height:20, borderRadius:999, flexShrink:0, background:"#fff", border: salinRekapRange === opt.id ? "6px solid #3b82f6" : "2px solid #cbd5e1" } }),
+              h("div", { style:{ flex:1 } }, [
+                h("div", { style:{ fontSize:13, fontWeight:800, color:"#0f172a" } }, opt.label),
+                h("div", { style:{ fontSize:11, fontWeight:600, color:"#94a3b8" } }, opt.desc)
+              ])
+            ])
+          )
+        ),
+        salinRekapRange === "1m" && h("div", { style:{ display:"flex", gap:8, marginBottom:12 } }, [
+          h("select", {
+            value: salinRekapMonth, onChange: e => setSalinRekapMonth(Number(e.target.value)),
+            style:{ flex:1, height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background:"#fff" }
+          }, MONTH_NAMES_ID.map((m, i) => h("option", { key: i, value: i }, m))),
+          h("select", {
+            value: salinRekapYear, onChange: e => setSalinRekapYear(Number(e.target.value)),
+            style:{ width:100, height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background:"#fff" }
+          }, (() => { const now = new Date().getFullYear(); const o = []; for (let y = now; y >= now-2; y--) o.push(h("option", { key:y, value:y }, y)); return o; })())
+        ]),
+        salinRekapRange === "custom" && h("div", { style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 } }, [
+          h("div", null, [
+            h("div", { style:{ fontSize:11, fontWeight:700, color:"#94a3b8", marginBottom:4 } }, "DARI TANGGAL"),
+            h("input", { type:"date", value: salinRekapStart, onChange: e => setSalinRekapStart(e.target.value), style:{ width:"100%", height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:600 } })
+          ]),
+          h("div", null, [
+            h("div", { style:{ fontSize:11, fontWeight:700, color:"#94a3b8", marginBottom:4 } }, "SAMPAI TANGGAL"),
+            h("input", { type:"date", value: salinRekapEnd, onChange: e => setSalinRekapEnd(e.target.value), style:{ width:"100%", height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:600 } })
+          ])
+        ]),
+        h("div", { style:{ border:"1px solid #e2e8f0", borderRadius:14, padding:12, marginBottom:16, background:"#fafbff" } }, [
+          h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:6 } }, [
+            h("div", { style:{ fontSize:11, fontWeight:800, color:"#64748b", letterSpacing:"0.06em" } }, "PILIH BATCH"),
+            h("div", { style:{ display:"flex", gap:6 } }, [
+              h("button", {
+                onClick: () => { const all = {}; allBatchEntries.forEach(e => { all[e.key] = true; }); setSalinRekapSelected(all); },
+                style:{ height:28, padding:"0 12px", borderRadius:8, border:"1px solid #cbd5e1", background:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", color:"#0f172a" }
+              }, "✓ Semua"),
+              h("button", {
+                onClick: () => setSalinRekapSelected({}),
+                style:{ height:28, padding:"0 12px", borderRadius:8, border:"1px solid #cbd5e1", background:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", color:"#64748b" }
+              }, "Kosongkan")
+            ])
+          ]),
+          allBatchEntries.length === 0 && h("div", { style:{ padding:16, textAlign:"center", color:"#94a3b8", fontSize:12, fontWeight:600 } }, "Belum ada batch"),
+          h("div", { style:{ maxHeight:220, overflowY:"auto", display:"flex", flexDirection:"column", gap:4 } },
+            ...allBatchEntries.map(e => {
+              const checked = !!salinRekapSelected[e.key];
+              const th = getProgramTheme(programConfig, e.program);
+              return h("label", {
+                key: e.key,
+                style:{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:10, cursor:"pointer",
+                  background: checked ? "#eff6ff" : "#fff",
+                  border: checked ? "1.5px solid #93c5fd" : "1px solid #e2e8f0" }
+              }, [
+                h("input", { type:"checkbox", checked, onChange: () => setSalinRekapSelected(prev => ({ ...prev, [e.key]: !prev[e.key] })), style:{ width:18, height:18, accentColor: th.accent } }),
+                h("span", { style:{ padding:"2px 8px", borderRadius:999, fontSize:10, fontWeight:900, background: th.accentLight, color: th.accentDark, flexShrink:0 } }, e.program + "·" + e.sub),
+                h("span", { style:{ fontSize:12, fontWeight:700, color:"#1e293b", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, e.label)
+              ]);
+            })
+          ),
+          h("div", { style:{ fontSize:11, fontWeight:800, color:"#1e40af", marginTop:10, paddingTop:8, borderTop:"1px solid #e2e8f0" } },
+            Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]).length + " dari " + allBatchEntries.length + " batch terpilih")
+        ]),
+        h("div", { style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 } }, [
+          h("button", { onClick: () => setShowSalinRekap(false), disabled: salinRekapBusy, style:{ borderRadius:999, background:"#f4f4f5", border:"1px solid #e4e4e7", padding:"12px 16px", fontSize:13, fontWeight:700, color:"#3f3f46", cursor: salinRekapBusy ? "wait" : "pointer", opacity: salinRekapBusy ? 0.6 : 1 } }, "Batal"),
+          h("button", { onClick: doSalinRekap, disabled: salinRekapBusy, style:{ borderRadius:999, background:"#25D366", border:"none", color:"#fff", padding:"12px 16px", fontSize:13, fontWeight:800, cursor: salinRekapBusy ? "wait" : "pointer", opacity: salinRekapBusy ? 0.6 : 1 } }, salinRekapBusy ? "Menyusun…" : "📋 Salin")
+        ])
+      ])
+    ]),
+
+    showPreview && h("div", { style:{ position:"fixed", inset:0, zIndex:250, display:"flex", alignItems:"flex-end", justifyContent:"center" } }, [
+      h("div", { onClick: () => setShowPreview(false), style:{ position:"absolute", inset:0, background:"rgba(0,0,0,.4)", backdropFilter:"blur(6px)" } }),
+      h("div", { style:{ position:"relative", width:"100%", maxWidth:520, background:"#fff", borderRadius:"28px 28px 0 0", boxShadow:"0 20px 80px rgba(0,0,0,.25)", maxHeight:"85vh", display:"flex", flexDirection:"column", overflow:"hidden", animation:"slideUp .3s ease" } }, [
+        h("div", { style:{ padding:"20px 24px", borderBottom:"1px solid #eee", display:"flex", justifyContent:"space-between", alignItems:"center" } }, [
+          h("div", null, [
+            h("div", { style:{ fontWeight:800, fontSize:15 } }, "Preview — " + previewLabel),
+            h("div", { style:{ fontSize:12, color:"#94a3b8", fontWeight:600 } }, "Tersalin otomatis • atau Kirim ke WA")
+          ]),
+          h("button", { onClick: () => setShowPreview(false), style:{ width:36, height:36, borderRadius:999, background:"rgba(0,0,0,.06)", border:"none", cursor:"pointer", fontSize:16 } }, "✕")
+        ]),
+        h("div", { style:{ padding:16, overflow:"auto", flex:1 } }, [
+          h("textarea", { ref: taRef, readOnly: true, value: previewText, onFocus: e => e.target.select(), onClick: e => e.target.select(), style:{ width:"100%", height:280, resize:"none", borderRadius:12, border:"1px solid #e4e4e7", background:"#fafafa", padding:16, fontSize:13, lineHeight:1.6, fontFamily:"monospace", outline:"none" } })
+        ]),
+        h("div", { style:{ padding:16, borderTop:"1px solid #eee", background:"#fcfcfc", display:"flex", gap:12 } }, [
+          h("button", { onClick: () => setShowPreview(false), style:{ flex:1, height:48, borderRadius:12, background:"#fff", border:"1px solid #e4e4e7", fontWeight:700, fontSize:13, cursor:"pointer" } }, "Tutup"),
+          h("button", { onClick: () => { window.open(`https://wa.me/${generalSettings.waNumber}?text=${encodeURIComponent(previewText)}`, "_blank"); }, style:{ flex:1, height:48, borderRadius:12, border:"none", background:"#25D366", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", boxShadow:"0 4px 12px rgba(37,211,102,.35)" } }, "📤 Kirim ke WA")
+        ])
+      ])
+    ]),
+
+    h(Toast, { msg: toastMsg, visible: toastVisible })
+  ]);
+}
+
+/* =====================================================================
+   ============ SUBUH DASHBOARD ========================================
+   ===================================================================== */
+function SubuhDashboard({ onExit }) {
+  const [dashMonth, setDashMonth] = useState(() => new Date().getMonth());
+  const [dashYear, setDashYear] = useState(() => new Date().getFullYear());
+  const [dashWholeMonth, setDashWholeMonth] = useState(true);
+  const [dashWeeks, setDashWeeks] = useState([1,2,3,4]);
+  const [dashBatch, setDashBatch] = useState("1");
+  const [dashboardData, setDashboardData] = useState(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+
+  const [showSalinRekap, setShowSalinRekap] = useState(false);
+  const [salinRekapRange, setSalinRekapRange] = useState("1w");
+  const [salinRekapStart, setSalinRekapStart] = useState(() => dateOffsetStr(new Date(), -6));
+  const [salinRekapEnd, setSalinRekapEnd] = useState(() => toInputDate(new Date()));
+  const [salinRekapSelected, setSalinRekapSelected] = useState({});
+  const [salinRekapBusy, setSalinRekapBusy] = useState(false);
+  const [salinRekapMonth, setSalinRekapMonth] = useState(() => new Date().getMonth());
+  const [salinRekapYear, setSalinRekapYear] = useState(() => new Date().getFullYear());
+
+  const [previewText, setPreviewText] = useState("");
+  const [previewLabel, setPreviewLabel] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
+  const taRef = useRef(null);
+
+  const [toastMsg, setToastMsg] = useState("");
+  const [toastVisible, setToastVisible] = useState(false);
+  const toast = (msg) => { setToastMsg(msg); setToastVisible(true); setTimeout(() => setToastVisible(false), 2800); };
+
+  const getDateList = () => {
+    const daysInMonth = new Date(dashYear, dashMonth + 1, 0).getDate();
+    if (dashWholeMonth) {
+      const s = `${dashYear}-${String(dashMonth+1).padStart(2,"0")}-01`;
+      const e = `${dashYear}-${String(dashMonth+1).padStart(2,"0")}-${String(daysInMonth).padStart(2,"0")}`;
+      return eachDateStr(s, e);
+    }
+    const ranges = weekRangesInMonth(dashYear, dashMonth).filter(r => dashWeeks.includes(r.week));
+    const list = [];
+    ranges.forEach(r => eachDateStr(r.start, r.end).forEach(d => list.push(d)));
+    return [...new Set(list)].sort();
+  };
+
+  const getStudentsForBatch = async (b) => {
+    try {
+      const snap = await db.ref(subuhStudentsPath(b)).once("value");
+      const val = snap.val();
+      if (Array.isArray(val) && val.length) {
+        return val.map(n => String(n).trim()).filter(Boolean).sort((a,c) => a.localeCompare(c, "id"));
+      }
+    } catch {}
+    return (SUBUH_BATCH_STUDENTS[b] || []).map(n => String(n).trim()).filter(Boolean).sort((a,c) => a.localeCompare(c, "id"));
+  };
+
+  const buildMatrixForBatch = async (b, dateList) => {
+    const names = await getStudentsForBatch(b);
+    const matrix = {};
+    names.forEach(n => { matrix[n] = {}; });
+    await Promise.all(dateList.map(ds =>
+      db.ref(subuhAttendancePath(b, ds)).once("value").then(snap => {
+        const val = snap.val() || {};
+        names.forEach(n => {
+          let st = null;
+          const item = val[toFbKey(n)] !== undefined ? val[toFbKey(n)] : val[n];
+          if (item && typeof item === "object") st = normalizeStatus(item.status);
+          else if (typeof item === "string") st = normalizeStatus(item);
+          matrix[n][ds] = st;
+        });
+      }).catch(() => { names.forEach(n => { matrix[n][ds] = matrix[n][ds] || null; }); })
+    ));
+    const totals = {};
+    names.forEach(n => {
+      const t = { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+      dateList.forEach(ds => { const st = matrix[n][ds]; if (st && t[st] !== undefined) t[st]++; });
+      totals[n] = t;
+    });
+    return { names, matrix, totals };
+  };
+
+  const sheetNameFor = (b) => {
+    const th = SUBUH_BATCH_THEME[b];
+    let n = (th && th.label) ? th.label : ("Batch " + b);
+    return String(n).replace(/[\\\/\?\*\[\]]/g, " ").slice(0, 31);
+  };
+
+  const openDashboard = async () => {
+    setDashboardLoading(true); setDashboardData(null);
+    try {
+      const dateList = getDateList();
+      if (!dateList.length) { setDashboardData({ error: "Tidak ada tanggal" }); setDashboardLoading(false); return; }
+      const { names, matrix, totals } = await buildMatrixForBatch(dashBatch, dateList);
+      const th = SUBUH_BATCH_THEME[dashBatch] || {};
+      setDashboardData({ start: dateList[0], end: dateList[dateList.length-1], dates: dateList, matrix, totals, names, batchKey: dashBatch, batchLabel: th.label || dashBatch, days: dateList.length });
+    } catch { setDashboardData({ error: "Gagal load data" }); }
+    setDashboardLoading(false);
+  };
+
+  const buildRekapTextFor = async (b, dateList) => {
+    const names = await getStudentsForBatch(b);
+    if (!names.length) return null;
+    const th = SUBUH_BATCH_THEME[b] || {};
+    const label = th.label || b;
+    const attMap = {};
+    names.forEach(n => { attMap[n] = {}; });
+    await Promise.all(dateList.map(async ds => {
+      try {
+        const snap = await db.ref(subuhAttendancePath(b, ds)).once("value");
+        const val = snap.val() || {};
+        names.forEach(n => {
+          const item = val[toFbKey(n)] !== undefined ? val[toFbKey(n)] : val[n];
+          let st = null;
+          if (item && typeof item === "object") st = normalizeStatus(item.status);
+          else if (typeof item === "string") st = normalizeStatus(item);
+          attMap[n][ds] = st;
+        });
+      } catch { names.forEach(n => { attMap[n][ds] = attMap[n][ds] || null; }); }
+    }));
+    const [y0, m0, day0] = dateList[0].split("-").map(Number);
+    const [yN, mN, dayN] = dateList[dateList.length - 1].split("-").map(Number);
+    let dateLabel;
+    if (y0 === yN && m0 === mN) dateLabel = `${day0}-${dayN}`;
+    else if (y0 === yN) dateLabel = `${day0} ${MONTH_NAMES_ID[m0-1]} - ${dayN} ${MONTH_NAMES_ID[mN-1]}`;
+    else dateLabel = `${day0}/${m0}/${y0} - ${dayN}/${mN}/${yN}`;
+    let t = `Rekapan (${label})\nTanggal: ${dateLabel}\n`;
+    names.forEach((name, i) => {
+      const emojis = dateList.map(ds => {
+        const st = attMap[name][ds];
+        if (st === "HADIR") return "✅";
+        if (st === "SAKIT") return "🆘";
+        if (st === "IZIN") return "ℹ️";
+        if (st === "ALFA") return "❌";
+        return "⬜";
+      }).join("");
+      t += `${i + 1}. ${name} ${emojis}\n`;
+    });
+    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum`;
+    return t;
+  };
+
+  const handleSalinRekapRangeChange = (range) => {
+    setSalinRekapRange(range);
+    if (range === "custom") {
+      let dl = [];
+      try { dl = getDateList(); } catch {}
+      if (!dl.length) dl = [dateOffsetStr(new Date(), -6), toInputDate(new Date())];
+      setSalinRekapStart(dl[0]);
+      setSalinRekapEnd(dl[dl.length - 1]);
+    }
+  };
+
+  const doSalinRekap = async () => {
+    setSalinRekapBusy(true);
+    try {
+      let dateList = [];
+      const today = new Date();
+      if (salinRekapRange === "1w") { for (let i = 6; i >= 0; i--) dateList.push(dateOffsetStr(today, -i)); }
+      else if (salinRekapRange === "2w") { for (let i = 13; i >= 0; i--) dateList.push(dateOffsetStr(today, -i)); }
+      else if (salinRekapRange === "1m") {
+        const daysInMonth = new Date(salinRekapYear, salinRekapMonth + 1, 0).getDate();
+        const s = `${salinRekapYear}-${String(salinRekapMonth+1).padStart(2,"0")}-01`;
+        const e = `${salinRekapYear}-${String(salinRekapMonth+1).padStart(2,"0")}-${String(daysInMonth).padStart(2,"0")}`;
+        dateList = eachDateStr(s, e);
+      } else {
+        if (!salinRekapStart || !salinRekapEnd) { toast("⚠️ Pilih tanggal"); setSalinRekapBusy(false); return; }
+        if (salinRekapStart > salinRekapEnd) { toast("⚠️ Tanggal mulai harus sebelum akhir"); setSalinRekapBusy(false); return; }
+        dateList = eachDateStr(salinRekapStart, salinRekapEnd);
+      }
+      if (!dateList.length) { toast("⚠️ Tidak ada tanggal"); setSalinRekapBusy(false); return; }
+      const selectedKeys = Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]);
+      if (!selectedKeys.length) { toast("⚠️ Pilih minimal 1 batch"); setSalinRekapBusy(false); return; }
+      let text = "";
+      if (selectedKeys.length === 1) {
+        text = await buildRekapTextFor(selectedKeys[0], dateList);
+        if (!text) { toast("⚠️ Tidak ada siswa"); setSalinRekapBusy(false); return; }
+      } else {
+        const blocks = [];
+        for (const k of selectedKeys) { try { const b = await buildRekapTextFor(k, dateList); if (b) blocks.push(b); } catch {} }
+        if (!blocks.length) { toast("⚠️ Tidak ada data"); setSalinRekapBusy(false); return; }
+        text = blocks.join("\n\n━━━━━━━━━━━━━━━\n\n");
+      }
+      const labels = { "1w":"1 Minggu", "2w":"2 Minggu", "1m":"1 Bulan", "custom":"Custom" };
+      setPreviewText(text); setPreviewLabel("Rekap " + labels[salinRekapRange]);
+      setShowSalinRekap(false); setShowPreview(true);
+      setTimeout(() => { if (taRef.current) { taRef.current.focus(); taRef.current.select(); } }, 120);
+      const ok = await copyText(text);
+      toast(ok ? "✅ Rekap disalin!" : "⚠️ Salin manual via preview");
+    } catch { toast("⚠️ Gagal menyusun rekap"); }
+    setSalinRekapBusy(false);
+  };
+
+  const exportAllXlsxRapi = async () => {
+    if (typeof ExcelJS === "undefined") return toast("⚠️ ExcelJS belum termuat, refresh");
+    const dateList = getDateList();
+    if (!dateList.length) return toast("⚠️ Pilih periode dulu");
+    setExportBusy(true); toast("⏳ Menyusun rekap…");
+    try {
+      const allRows = [];
+      for (const b of SUBUH_BATCH_LIST) {
+        const { names, matrix, totals } = await buildMatrixForBatch(b, dateList);
+        if (!names || !names.length) continue;
+        const sheetLabel = sheetNameFor(b);
+        names.forEach(n => {
+          const t = totals[n] || { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+          const days = dateList.map(ds => statusShort((matrix[n] && matrix[n][ds]) || null));
+          allRows.push({ program: sheetLabel, nama: n, days, h: t.HADIR||0, i: t.IZIN||0, s: t.SAKIT||0, a: t.ALFA||0 });
+        });
+      }
+      if (!allRows.length) { setExportBusy(false); return toast("⚠️ Tidak ada data"); }
+
+      const dayCount = dateList.length;
+      const start = dateList[0], end = dateList[dateList.length-1];
+      const monthLabel = MONTH_NAMES_ID[dashMonth];
+      const year = dashYear;
+
+      const workbook = new ExcelJS.Workbook();
+      const ws = workbook.addWorksheet("Rekap Absensi Gabungan");
+      const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F4E79" } };
+      const headerFont = { name: "Arial", bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
+      const normalFont = { name: "Arial", size: 9 };
+      const titleFont = { name: "Arial", bold: true, size: 14, color: { argb: "FF1F4E79" } };
+      const subtitleFont = { name: "Arial", bold: true, size: 11 };
+      const thinBorder = { top:{style:"thin"}, left:{style:"thin"}, bottom:{style:"thin"}, right:{style:"thin"} };
+      const fillH = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+      const fillI = { type: "pattern", pattern: "solid", fgColor: { argb: "FFBDD7EE" } };
+      const fillS = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2D5F1" } };
+      const fillA = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } };
+      const totalCols = 3 + dayCount + 4;
+
+      ws.mergeCells(1, 1, 1, totalCols);
+      const titleCell = ws.getCell(1, 1);
+      titleCell.value = `REKAP ABSENSI ${SUBUH_KELAS.toUpperCase()} SEMUA PROGRAM - ${String(monthLabel).toUpperCase()} ${year}`;
+      titleCell.font = titleFont;
+      titleCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      ws.mergeCells(2, 1, 2, totalCols);
+      const subCell = ws.getCell(2, 1);
+      subCell.value = `Periode: ${start} s.d. ${end} | Digabung dari semua batch`;
+      subCell.font = subtitleFont;
+      subCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const headers = ["No", "Program", "Nama"];
+      dateList.forEach(ds => headers.push(ds.slice(8)));
+      headers.push("H", "I", "S", "A");
+      const headerRow = ws.getRow(4);
+      headers.forEach((h, i) => {
+        const cell = headerRow.getCell(i + 1);
+        cell.value = h; cell.font = headerFont; cell.fill = headerFill;
+        cell.alignment = { horizontal: "center", vertical: "middle" }; cell.border = thinBorder;
+      });
+      headerRow.height = 22;
+
+      allRows.forEach((r, idx) => {
+        const row = ws.getRow(idx + 5);
+        const c1 = row.getCell(1); c1.value = idx+1; c1.font = normalFont; c1.alignment = {horizontal:"center",vertical:"middle"}; c1.border = thinBorder;
+        const c2 = row.getCell(2); c2.value = r.program; c2.font = normalFont; c2.alignment = {horizontal:"center",vertical:"middle"}; c2.border = thinBorder;
+        const c3 = row.getCell(3); c3.value = r.nama; c3.font = normalFont; c3.alignment = {horizontal:"left",vertical:"middle"}; c3.border = thinBorder;
+        r.days.forEach((val, dIdx) => {
+          const cell = row.getCell(4 + dIdx);
+          cell.value = val; cell.font = normalFont; cell.alignment = {horizontal:"center",vertical:"middle"}; cell.border = thinBorder;
+          if (val === "H") cell.fill = fillH;
+          else if (val === "I") cell.fill = fillI;
+          else if (val === "S") cell.fill = fillS;
+          else if (val === "A") cell.fill = fillA;
+        });
+        [r.h, r.i, r.s, r.a].forEach((val, tIdx) => {
+          const cell = row.getCell(4 + dayCount + tIdx);
+          cell.value = val; cell.font = normalFont; cell.alignment = {horizontal:"center",vertical:"middle"}; cell.border = thinBorder;
+          if (val > 0) cell.fill = [fillH, fillI, fillS, fillA][tIdx];
+        });
+      });
+
+      ws.getColumn(1).width = 5; ws.getColumn(2).width = 22; ws.getColumn(3).width = 28;
+      for (let i = 4; i < 4 + dayCount; i++) ws.getColumn(i).width = 3.5;
+      for (let i = 4 + dayCount; i < 4 + dayCount + 4; i++) ws.getColumn(i).width = 4.5;
+
+      const legendStart = 4 + allRows.length + 2;
+      ws.getCell(legendStart, 1).value = "Keterangan:";
+      ws.getCell(legendStart, 1).font = { name: "Arial", bold: true, size: 10 };
+      [["H","= Hadir (Hijau)",fillH],["I","= Izin (Biru)",fillI],["S","= Sakit (Ungu)",fillS],["A","= Alpha (Merah)",fillA],["-","= Tidak ada data / Libur",null]].forEach((leg, i) => {
+        const cell = ws.getCell(legendStart + 1 + i, 1);
+        cell.value = leg[0]; if (leg[2]) cell.fill = leg[2];
+        cell.border = thinBorder; cell.alignment = { horizontal: "center" };
+        cell.font = { name: "Arial", bold: true, size: 9 };
+        ws.getCell(legendStart + 1 + i, 2).value = leg[1];
+        ws.getCell(legendStart + 1 + i, 2).font = normalFont;
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url;
+      a.download = `Rekap_Subuh_LN_${monthLabel}_${year}_Gabungan.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast("✅ Excel gabungan diunduh");
+    } catch (err) { console.error(err); toast("⚠️ Gagal ekspor: " + (err.message || "")); }
+    setExportBusy(false);
+  };
+
+  const dashHasMatrix = dashboardData && dashboardData.matrix;
+  const activeTheme = SUBUH_BATCH_THEME[dashBatch] || SUBUH_BATCH_THEME["1"];
+
+  return h("div", { style:{ minHeight:"100vh", background:"#f1f5f9", paddingBottom:40 } }, [
+    h("div", { style:{ background:"#0f172a", color:"#fff", padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, boxShadow:"0 4px 20px rgba(0,0,0,.15)", position:"sticky", top:0, zIndex:30 } }, [
+      h("div", { style:{ display:"flex", alignItems:"center", gap:12 } }, [
+        h("button", {
+          onClick: onExit,
+          style:{ height:36, width:36, borderRadius:10, border:"1px solid rgba(255,255,255,.2)", background:"rgba(255,255,255,.1)", color:"#fff", fontWeight:900, fontSize:16, cursor:"pointer" }
+        }, "←"),
+        h("div", { style:{ width:40, height:40, borderRadius:12, background:"#16a34a", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 } }, "🕌"),
+        h("div", null, [
+          h("div", { style:{ fontSize:15, fontWeight:900 } }, "Dashboard Subuh LN"),
+          h("div", { style:{ fontSize:11, fontWeight:600, color:"rgba(255,255,255,.6)", letterSpacing:"0.06em" } }, "ABSENSI SHALAT SUBUH · PROGRAM LUAR NEGERI")
+        ])
+      ])
+    ]),
+
+    h("div", { style:{ maxWidth:1100, margin:"0 auto", padding:"20px 16px 0" } }, [
+      h("div", { style:{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #e2e8f0", boxShadow:"0 8px 30px rgba(0,0,0,.04)", marginBottom:16 } }, [
+        h("div", { style:{ fontSize:15, fontWeight:800, marginBottom:14 } }, "🗓️ Pilih Periode"),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:10, alignItems:"center", marginBottom:12 } }, [
+          h("label", { style:{ fontSize:13, fontWeight:700, display:"flex", alignItems:"center", gap:8 } }, [
+            "📅 Bulan",
+            h("select", {
+              value: `${dashYear}-${String(dashMonth+1).padStart(2,"0")}`,
+              onChange: e => { const [y,m] = e.target.value.split("-").map(Number); setDashYear(y); setDashMonth(m-1); },
+              style: { padding:"8px 12px", borderRadius:10, border:"1px solid #cbd5e1", fontWeight:700, fontSize:13, background:"#fff" }
+            }, (() => {
+              const now = new Date(); const opts = [];
+              for (let yi = now.getFullYear(); yi >= now.getFullYear()-2; yi--) for (let mi = 0; mi < 12; mi++) {
+                const val = `${yi}-${String(mi+1).padStart(2,"0")}`;
+                opts.push(h("option", { key: val, value: val }, MONTH_NAMES_ID[mi] + " " + yi));
+              }
+              return opts;
+            })())
+          ]),
+          h("label", { style:{ display:"inline-flex", alignItems:"center", gap:6, padding:"8px 14px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background: dashWholeMonth ? "rgba(34,197,94,.12)" : "#fff", cursor:"pointer" } }, [
+            h("input", { type:"checkbox", checked: dashWholeMonth, onChange: e => setDashWholeMonth(e.target.checked) }),
+            "📆 Keseluruhan bulan"
+          ])
+        ]),
+        !dashWholeMonth && h("div", { style:{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:12 } },
+          [1,2,3,4].map(w =>
+            h("label", { key: w, style:{ display:"inline-flex", alignItems:"center", gap:4, padding:"6px 12px", borderRadius:9, border:"1px solid #e2e8f0", fontSize:12, fontWeight:700, background: dashWeeks.includes(w) ? "rgba(59,130,246,.12)" : "#fff", cursor:"pointer" } }, [
+              h("input", { type:"checkbox", checked: dashWeeks.includes(w), onChange: e => setDashWeeks(prev => e.target.checked ? [...prev, w].sort() : prev.filter(x => x !== w)) }),
+              "Minggu " + w
+            ])
+          )
+        ),
+        h("div", { style:{ fontSize:11, fontWeight:800, color:"#94a3b8", letterSpacing:"0.06em", marginBottom:8, marginTop:8 } }, "PREVIEW BATCH"),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:14 } },
+          SUBUH_BATCH_LIST.map(b => {
+            const th = SUBUH_BATCH_THEME[b] || {};
+            const active = dashBatch === b;
+            const short = b === "MM" ? "MM" : b === "MS" ? "MS" : b === "TR" ? "TR" : b === "A18" ? "A18" : ("B" + b);
+            return h("button", {
+              key: b, onClick: () => setDashBatch(b), title: th.label || b,
+              style: { height:36, padding:"0 14px", borderRadius:999, fontSize:12, fontWeight:800, border: active ? "none" : "1px solid #cbd5e1", background: active ? (th.accent || "#0f172a") : "#fff", color: active ? "#fff" : "#475569", cursor:"pointer" }
+            }, short);
+          })
+        ),
+        h("div", { style:{ fontSize:12, fontWeight:700, color:"#64748b", marginBottom:12 } },
+          "Preview: " + (activeTheme.label || dashBatch)),
+        h("div", { style:{ display:"flex", flexWrap:"wrap", gap:8 } }, [
+          h("button", {
+            onClick: openDashboard, disabled: dashboardLoading,
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"none", background: activeTheme.accent, color:"#fff", fontWeight:800, fontSize:13, cursor: dashboardLoading ? "wait" : "pointer", opacity: dashboardLoading ? 0.6 : 1 }
+          }, dashboardLoading ? "⏳ Memuat…" : "Tampilkan Rekap"),
+          h("button", {
+            onClick: () => {
+              if (Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]).length === 0) setSalinRekapSelected({ [dashBatch]: true });
+              setShowSalinRekap(true);
+            },
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"1px solid #cbd5e1", background:"#fff", color:"#0f172a", fontWeight:800, fontSize:13, cursor:"pointer" }
+          }, "📋 Salin Rekap"),
+          h("button", {
+            onClick: exportAllXlsxRapi, disabled: exportBusy,
+            style: { height:44, padding:"0 20px", borderRadius:12, border:"1px solid #16a34a", background:"#f0fdf4", color:"#15803d", fontWeight:800, fontSize:13, cursor: exportBusy ? "wait" : "pointer", opacity: exportBusy ? 0.6 : 1 }
+          }, exportBusy ? "⏳ Menyusun Excel…" : "📥 Ekspor Excel Gabungan")
+        ]),
+        h("div", { style:{ fontSize:11, color:"#94a3b8", fontWeight:600, marginTop:10, lineHeight:1.5 } },
+          "💡 Ekspor Excel = SEMUA batch digabung 1 sheet. Salin Rekap = pilih batch sendiri.")
+      ]),
+
+      dashboardLoading && h("div", { style:{ textAlign:"center", padding:40, color:"#64748b", fontWeight:700 } }, "⏳ Memuat data…"),
+      !dashboardLoading && dashboardData && dashboardData.error && h("div", { style:{ padding:20, borderRadius:16, background:"#fef2f2", border:"1px solid #fecaca", color:"#b91c1c", fontWeight:700, textAlign:"center" } }, dashboardData.error),
+      !dashboardLoading && dashHasMatrix && h("div", { style:{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #e2e8f0", boxShadow:"0 8px 30px rgba(0,0,0,.04)" } }, [
+        h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10, marginBottom:12 } }, [
+          h("div", null, [
+            h("div", { style:{ fontSize:15, fontWeight:800 } }, "📊 " + dashboardData.batchLabel),
+            h("div", { style:{ fontSize:12, color:"#64748b", fontWeight:600, marginTop:2 } }, `Periode ${dashboardData.start} → ${dashboardData.end} (${dashboardData.days} hari) · ${dashboardData.names.length} siswa`)
+          ]),
+          h("div", { style:{ fontSize:11, color:"#94a3b8", fontWeight:700 } }, "H=Hadir · I=Izin · S=Sakit · A=Alfa")
+        ]),
+        h("div", { style:{ overflowX:"auto", maxHeight:"62vh", overflowY:"auto", border:"1px solid #e2e8f0", borderRadius:12 } },
+          h("table", { style:{ borderCollapse:"collapse", fontSize:11, minWidth:"100%" } }, [
+            h("thead", null,
+              h("tr", { style:{ position:"sticky", top:0, background:"#f8fafc", zIndex:2 } }, [
+                h("th", { style:{ textAlign:"left", padding:"10px 8px", borderBottom:"2px solid #e2e8f0", position:"sticky", left:0, background:"#f8fafc", zIndex:3, minWidth:150 } }, "Nama"),
+                ...dashboardData.dates.map(ds => h("th", { key: ds, style:{ textAlign:"center", padding:"6px 4px", borderBottom:"2px solid #e2e8f0", minWidth:30, fontWeight:800 }, title: ds }, ds.slice(8))),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#16a34a" } }, "H"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#2563eb" } }, "I"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#ca8a04" } }, "S"),
+                h("th", { style:{ textAlign:"center", padding:"6px 6px", borderBottom:"2px solid #e2e8f0", color:"#dc2626" } }, "A")
+              ])
+            ),
+            h("tbody", null,
+              dashboardData.names.length === 0 && h("tr", null, h("td", { colSpan: 5 + dashboardData.dates.length, style:{ textAlign:"center", padding:24, color:"#94a3b8", fontWeight:600 } }, "Belum ada siswa")),
+              dashboardData.names.map((n, idx) => {
+                const t = dashboardData.totals[n] || { HADIR:0, IZIN:0, SAKIT:0, ALFA:0 };
+                return h("tr", { key: n, style:{ borderBottom:"1px solid #f1f5f9", background: idx % 2 === 0 ? "#fff" : "#fafbff" } }, [
+                  h("td", { style:{ padding:"6px 8px", fontWeight:700, position:"sticky", left:0, background: idx % 2 === 0 ? "#fff" : "#fafbff", whiteSpace:"nowrap", textTransform:"uppercase" } }, n),
+                  ...dashboardData.dates.map(ds => {
+                    const st = (dashboardData.matrix[n] && dashboardData.matrix[n][ds]) || null;
+                    let bg = "transparent", color = "#94a3b8";
+                    if (st === "HADIR") { bg = "#dcfce7"; color = "#166534"; }
+                    else if (st === "IZIN") { bg = "#dbeafe"; color = "#1e40af"; }
+                    else if (st === "SAKIT") { bg = "#f3e8ff"; color = "#6b21a8"; }
+                    else if (st === "ALFA") { bg = "#fee2e2"; color = "#991b1b"; }
+                    return h("td", { key: ds, title: ds + (st ? (" · " + st) : " · Kosong"), style:{ textAlign:"center", padding:"4px 2px", background: bg, color, fontWeight:800, fontSize:10 } }, statusShort(st));
+                  }),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#16a34a", padding:"4px 6px" } }, t.HADIR),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#2563eb", padding:"4px 6px" } }, t.IZIN),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#ca8a04", padding:"4px 6px" } }, t.SAKIT),
+                  h("td", { style:{ textAlign:"center", fontWeight:800, color:"#dc2626", padding:"4px 6px" } }, t.ALFA)
+                ]);
+              })
+            )
+          ])
+        )
+      ])
+    ]),
+
+    showSalinRekap && h("div", { style:{ position:"fixed", inset:0, zIndex:220, display:"flex", alignItems:"center", justifyContent:"center", padding:16 } }, [
+      h("div", { onClick: () => { if (!salinRekapBusy) setShowSalinRekap(false); }, style:{ position:"absolute", inset:0, background:"rgba(0,0,0,.5)", backdropFilter:"blur(6px)" } }),
+      h("div", { style:{ position:"relative", width:"100%", maxWidth:460, maxHeight:"92vh", overflowY:"auto", borderRadius:24, background:"#fff", padding:24, boxShadow:"0 20px 60px -12px rgba(0,0,0,.4)", animation:"scaleIn .25s ease" } }, [
+        h("button", { onClick: () => { if (!salinRekapBusy) setShowSalinRekap(false); }, style:{ position:"absolute", right:12, top:12, width:32, height:32, borderRadius:999, background:"#f4f4f5", border:"none", color:"#71717a", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14 } }, "✕"),
+        h("div", { style:{ fontSize:16, fontWeight:800, marginBottom:6, paddingRight:30 } }, "📋 Salin Rekap"),
+        h("div", { style:{ fontSize:13, color:"#64748b", marginBottom:16, lineHeight:1.45 } }, "Pilih rentang tanggal."),
+        h("div", { style:{ display:"grid", gap:6, marginBottom:12 } },
+          [
+            { id:"1w", label:"1 Minggu", desc:"7 hari terakhir" },
+            { id:"2w", label:"2 Minggu", desc:"14 hari terakhir" },
+            { id:"1m", label:"1 Bulan", desc:"Bulan " + MONTH_NAMES_ID[salinRekapMonth] + " " + salinRekapYear },
+            { id:"custom", label:"Custom", desc:"Pilih tanggal mulai & akhir" }
+          ].map(opt =>
+            h("button", {
+              key: opt.id, onClick: () => handleSalinRekapRangeChange(opt.id),
+              style: { display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, width:"100%", textAlign:"left", cursor:"pointer",
+                border: salinRekapRange === opt.id ? "2px solid #3b82f6" : "1px solid #e2e8f0",
+                background: salinRekapRange === opt.id ? "#eff6ff" : "#fff" }
+            }, [
+              h("div", { style:{ width:20, height:20, borderRadius:999, flexShrink:0, background:"#fff", border: salinRekapRange === opt.id ? "6px solid #3b82f6" : "2px solid #cbd5e1" } }),
+              h("div", { style:{ flex:1 } }, [
+                h("div", { style:{ fontSize:13, fontWeight:800, color:"#0f172a" } }, opt.label),
+                h("div", { style:{ fontSize:11, fontWeight:600, color:"#94a3b8" } }, opt.desc)
+              ])
+            ])
+          )
+        ),
+        salinRekapRange === "1m" && h("div", { style:{ display:"flex", gap:8, marginBottom:12 } }, [
+          h("select", {
+            value: salinRekapMonth, onChange: e => setSalinRekapMonth(Number(e.target.value)),
+            style:{ flex:1, height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background:"#fff" }
+          }, MONTH_NAMES_ID.map((m, i) => h("option", { key: i, value: i }, m))),
+          h("select", {
+            value: salinRekapYear, onChange: e => setSalinRekapYear(Number(e.target.value)),
+            style:{ width:100, height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:700, background:"#fff" }
+          }, (() => { const now = new Date().getFullYear(); const o = []; for (let y = now; y >= now-2; y--) o.push(h("option", { key:y, value:y }, y)); return o; })())
+        ]),
+        salinRekapRange === "custom" && h("div", { style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 } }, [
+          h("div", null, [
+            h("div", { style:{ fontSize:11, fontWeight:700, color:"#94a3b8", marginBottom:4 } }, "DARI TANGGAL"),
+            h("input", { type:"date", value: salinRekapStart, onChange: e => setSalinRekapStart(e.target.value), style:{ width:"100%", height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:600 } })
+          ]),
+          h("div", null, [
+            h("div", { style:{ fontSize:11, fontWeight:700, color:"#94a3b8", marginBottom:4 } }, "SAMPAI TANGGAL"),
+            h("input", { type:"date", value: salinRekapEnd, onChange: e => setSalinRekapEnd(e.target.value), style:{ width:"100%", height:40, padding:"0 10px", borderRadius:10, border:"1px solid #cbd5e1", fontSize:13, fontWeight:600 } })
+          ])
+        ]),
+        h("div", { style:{ border:"1px solid #e2e8f0", borderRadius:14, padding:12, marginBottom:16, background:"#fafbff" } }, [
+          h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:6 } }, [
+            h("div", { style:{ fontSize:11, fontWeight:800, color:"#64748b", letterSpacing:"0.06em" } }, "PILIH BATCH"),
+            h("div", { style:{ display:"flex", gap:6 } }, [
+              h("button", {
+                onClick: () => { const all = {}; SUBUH_BATCH_LIST.forEach(b => { all[b] = true; }); setSalinRekapSelected(all); },
+                style:{ height:28, padding:"0 12px", borderRadius:8, border:"1px solid #cbd5e1", background:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", color:"#0f172a" }
+              }, "✓ Semua"),
+              h("button", {
+                onClick: () => setSalinRekapSelected({}),
+                style:{ height:28, padding:"0 12px", borderRadius:8, border:"1px solid #cbd5e1", background:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", color:"#64748b" }
+              }, "Kosongkan")
+            ])
+          ]),
+          h("div", { style:{ maxHeight:220, overflowY:"auto", display:"flex", flexDirection:"column", gap:4 } },
+            ...SUBUH_BATCH_LIST.map(b => {
+              const checked = !!salinRekapSelected[b];
+              const th = SUBUH_BATCH_THEME[b] || {};
+              const short = b === "MM" ? "MM" : b === "MS" ? "MS" : b === "TR" ? "TR" : b === "A18" ? "A18" : ("B" + b);
+              return h("label", {
+                key: b,
+                style:{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:10, cursor:"pointer",
+                  background: checked ? "#eff6ff" : "#fff",
+                  border: checked ? "1.5px solid #93c5fd" : "1px solid #e2e8f0" }
+              }, [
+                h("input", { type:"checkbox", checked, onChange: () => setSalinRekapSelected(prev => ({ ...prev, [b]: !prev[b] })), style:{ width:18, height:18, accentColor: th.accent || "#3b82f6" } }),
+                h("span", { style:{ padding:"2px 8px", borderRadius:999, fontSize:10, fontWeight:900, background: th.accentLight || "#e2e8f0", color: th.accentDark || "#475569", flexShrink:0 } }, short),
+                h("span", { style:{ fontSize:12, fontWeight:700, color:"#1e293b", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, th.label || b)
+              ]);
+            })
+          ),
+          h("div", { style:{ fontSize:11, fontWeight:800, color:"#1e40af", marginTop:10, paddingTop:8, borderTop:"1px solid #e2e8f0" } },
+            Object.keys(salinRekapSelected).filter(k => salinRekapSelected[k]).length + " dari " + SUBUH_BATCH_LIST.length + " batch terpilih")
+        ]),
+        h("div", { style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 } }, [
+          h("button", { onClick: () => setShowSalinRekap(false), disabled: salinRekapBusy, style:{ borderRadius:999, background:"#f4f4f5", border:"1px solid #e4e4e7", padding:"12px 16px", fontSize:13, fontWeight:700, color:"#3f3f46", cursor: salinRekapBusy ? "wait" : "pointer", opacity: salinRekapBusy ? 0.6 : 1 } }, "Batal"),
+          h("button", { onClick: doSalinRekap, disabled: salinRekapBusy, style:{ borderRadius:999, background:"#25D366", border:"none", color:"#fff", padding:"12px 16px", fontSize:13, fontWeight:800, cursor: salinRekapBusy ? "wait" : "pointer", opacity: salinRekapBusy ? 0.6 : 1 } }, salinRekapBusy ? "Menyusun…" : "📋 Salin")
+        ])
+      ])
+    ]),
+
+    showPreview && h("div", { style:{ position:"fixed", inset:0, zIndex:250, display:"flex", alignItems:"flex-end", justifyContent:"center" } }, [
+      h("div", { onClick: () => setShowPreview(false), style:{ position:"absolute", inset:0, background:"rgba(0,0,0,.4)", backdropFilter:"blur(6px)" } }),
+      h("div", { style:{ position:"relative", width:"100%", maxWidth:520, background:"#fff", borderRadius:"28px 28px 0 0", boxShadow:"0 20px 80px rgba(0,0,0,.25)", maxHeight:"85vh", display:"flex", flexDirection:"column", overflow:"hidden", animation:"slideUp .3s ease" } }, [
+        h("div", { style:{ padding:"20px 24px", borderBottom:"1px solid #eee", display:"flex", justifyContent:"space-between", alignItems:"center" } }, [
+          h("div", null, [
+            h("div", { style:{ fontWeight:800, fontSize:15 } }, "Preview — " + previewLabel),
+            h("div", { style:{ fontSize:12, color:"#94a3b8", fontWeight:600 } }, "Tersalin otomatis • atau Kirim ke WA")
+          ]),
+          h("button", { onClick: () => setShowPreview(false), style:{ width:36, height:36, borderRadius:999, background:"rgba(0,0,0,.06)", border:"none", cursor:"pointer", fontSize:16 } }, "✕")
+        ]),
+        h("div", { style:{ padding:16, overflow:"auto", flex:1 } }, [
+          h("textarea", { ref: taRef, readOnly: true, value: previewText, onFocus: e => e.target.select(), onClick: e => e.target.select(), style:{ width:"100%", height:280, resize:"none", borderRadius:12, border:"1px solid #e4e4e7", background:"#fafafa", padding:16, fontSize:13, lineHeight:1.6, fontFamily:"monospace", outline:"none" } })
+        ]),
+        h("div", { style:{ padding:16, borderTop:"1px solid #eee", background:"#fcfcfc", display:"flex", gap:12 } }, [
+          h("button", { onClick: () => setShowPreview(false), style:{ flex:1, height:48, borderRadius:12, background:"#fff", border:"1px solid #e4e4e7", fontWeight:700, fontSize:13, cursor:"pointer" } }, "Tutup"),
+          h("button", { onClick: () => { window.open(`https://wa.me/6285896639315?text=${encodeURIComponent(previewText)}`, "_blank"); }, style:{ flex:1, height:48, borderRadius:12, border:"none", background:"#25D366", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", boxShadow:"0 4px 12px rgba(37,211,102,.35)" } }, "📤 Kirim ke WA")
+        ])
+      ])
+    ]),
+
+    h(Toast, { msg: toastMsg, visible: toastVisible })
+  ]);
+}
+
+/* =====================================================================
+   ============ LANDING / SELECTION SCREEN =============================
+   ===================================================================== */
+function LandingScreen({ onSelect }) {
+  const cards = [
+    {
+      id: "template",
+      icon: "📚",
+      bg: "#7c3aed",
+      title: "Template Absensi",
+      subtitle: "Multi-Kelas · Per Room",
+      desc: "Dashboard untuk kelas template. Butuh kode kelas untuk masuk (sistem room per kelas).",
+      tag: "🔑 Butuh kode kelas"
+    },
+    {
+      id: "subuh",
+      icon: "🕌",
+      bg: "#16a34a",
+      title: "Absensi Subuh LN",
+      subtitle: "Program Luar Negeri",
+      desc: "Absensi shalat subuh semua batch program luar negeri. Langsung masuk tanpa kode.",
+      tag: "✓ Langsung masuk"
+    }
+  ];
+
+  return h("div", {
+    style: { minHeight:"100vh", background:"linear-gradient(135deg, #f0f9ff 0%, #c7d2fe 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }
+  }, [
+    h("div", { style:{ width:"100%", maxWidth:800 } }, [
+      h("div", { style:{ textAlign:"center", marginBottom:36 } }, [
+        h("div", { style:{ width:72, height:72, borderRadius:22, background:"#0f172a", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:900, fontSize:32, margin:"0 auto 16px" } }, "📊"),
+        h("div", { style:{ fontSize:28, fontWeight:900, letterSpacing:"-0.03em", color:"#0f172a" } }, "Dashboard Rekap"),
+        h("div", { style:{ fontSize:13, fontWeight:600, color:"#64748b", marginTop:8, letterSpacing:"0.08em" } }, "LP2SSC · PANEL ADMIN · REKAP & EXCEL")
+      ]),
+      h("div", { style:{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))", gap:16 } },
+        cards.map(card =>
+          h("button", {
+            key: card.id,
+            onClick: () => onSelect(card.id),
+            style: {
+              background:"#fff", borderRadius:24, padding:28, border:"1px solid #e2e8f0",
+              boxShadow:"0 12px 40px -12px rgba(0,0,0,.15)", cursor:"pointer",
+              textAlign:"left", display:"flex", flexDirection:"column", gap:14,
+              transition:"all .2s", animation:"scaleIn .3s ease"
+            },
+            onMouseEnter: e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 20px 50px -12px rgba(0,0,0,.25)"; },
+            onMouseLeave: e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 12px 40px -12px rgba(0,0,0,.15)"; }
+          }, [
+            h("div", { style:{ display:"flex", alignItems:"center", gap:14 } }, [
+              h("div", { style:{ width:56, height:56, borderRadius:16, background: card.bg, color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:28, flexShrink:0 } }, card.icon),
+              h("div", { style:{ flex:1, minWidth:0 } }, [
+                h("div", { style:{ fontSize:20, fontWeight:900, color:"#0f172a", letterSpacing:"-0.02em" } }, card.title),
+                h("div", { style:{ fontSize:12, fontWeight:700, color:"#64748b", marginTop:2, letterSpacing:"0.03em" } }, card.subtitle)
+              ])
+            ]),
+            h("div", { style:{ fontSize:13, color:"#475569", fontWeight:500, lineHeight:1.55 } }, card.desc),
+            h("div", { style:{ fontSize:11, fontWeight:800, padding:"6px 12px", borderRadius:999, background: card.bg + "18", color: card.bg, alignSelf: "flex-start", letterSpacing:"0.03em" } }, card.tag)
+          ])
+        )
+      ),
+      h("div", { style:{ marginTop:36, textAlign:"center", fontSize:11, color:"#94a3b8", fontWeight:600, letterSpacing:"0.05em" } },
+        "LP2SSC · Dashboard Rekap · Read-Only")
+    ])
+  ]);
+}
+
+/* =====================================================================
+   ============ MAIN APP ==============================================
+   ===================================================================== */
+function App() {
+  const [mode, setMode] = useState("select");
+
+  if (mode === "select") return h(LandingScreen, { onSelect: setMode });
+  if (mode === "template") return h(TemplateDashboard, { onExit: () => setMode("select") });
+  if (mode === "subuh") return h(SubuhDashboard, { onExit: () => setMode("select") });
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>
