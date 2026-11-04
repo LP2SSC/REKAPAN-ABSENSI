@@ -414,7 +414,7 @@ useEffect(() => {
       }).join("");
       t += `${i + 1}. ${name} ${emojis}\n`;
     });
-    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum Ke Absen`;
+    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum`;
     return t;
   };
 
@@ -571,7 +571,7 @@ useEffect(() => {
       const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url;
-      a.download = `Rekap_${roomName.replace(/[^A-Za-z0-9]/g,"_")}_${monthLabel}_${year}.xlsx`;
+      a.download = `Rekap ${roomName.replace(/[^A-Za-z0-9]/g," ")} Bulan ${monthLabel} ${year}.xlsx`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
       toast("✅ Excel diunduh");
@@ -1038,7 +1038,7 @@ function SubuhDashboard({ onExit }) {
       }).join("");
       t += `${i + 1}. ${name} ${emojis}\n`;
     });
-    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum Ke Absen`;
+    t += `\n✅ Hadir · 🆘 Sakit · ℹ️ Izin · ❌ Alfa · ⬜ Belum`;
     return t;
   };
 
@@ -1194,7 +1194,7 @@ function SubuhDashboard({ onExit }) {
       const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url;
-      a.download = `Rekap_Subuh_LN_${monthLabel}_${year}_Gabungan.xlsx`;
+      a.download = `Rekap Absensi Subuh LN Bulan ${monthLabel} ${year}.xlsx`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
       toast("✅ Excel gabungan diunduh");
